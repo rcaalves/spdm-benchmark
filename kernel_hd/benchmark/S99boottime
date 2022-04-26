@@ -1,0 +1,4 @@
+if [ $1 = start ]; then
+	dmesg | grep SPDM_ENABLED >> /root/boottimes.log
+	awk '{print $1}' /proc/uptime >> /root/boottimes.log
+fi
