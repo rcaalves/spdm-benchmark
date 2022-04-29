@@ -56,7 +56,8 @@ SPDM_INCLUDE =  \
         -I $(SPDM_HEADERS)/library \
         -I $(SPDM_HEADERS)/industry_standard \
         -I $(SPDM_DIR)/library/spdm_common_lib \
-        -I $(SPDM_DIR)/library/spdm_requester_lib
+        -I $(SPDM_DIR)/library/spdm_requester_lib \
+	-I $(SPDM_DIR)/library/spdm_secured_message_lib
 
 
 # # ccflags-y += $(SPDM_INCLUDE)
