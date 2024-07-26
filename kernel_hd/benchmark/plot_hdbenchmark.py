@@ -127,7 +127,7 @@ for metric in metric_names:
 		plot_means = defaultdict(lambda: [])
 		plot_errors = defaultdict(lambda: [])
 		fig, ax = plt.subplots()
-		plt.grid(b=True, which='major', color='gray', linestyle='--', lw=0.5, axis='y')
+		plt.grid(visible=True, which='major', color='gray', linestyle='--', lw=0.5, axis='y')
 
 	plot_labels += (metric,)
 
@@ -151,6 +151,9 @@ for metric in metric_names:
 
 		if "fio" in metric:
 			ax.set_yscale('log')
+			
+		if "dd" in metric:
+			ax.set_ylim([0, ax.get_ylim()[1]*1.05])
 
 		# Add some text for labels, title and custom x-axis tick labels, etc.
 		ax.set_ylabel(get_ylabel(metric))

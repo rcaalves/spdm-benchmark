@@ -1,6 +1,6 @@
-#include"spdm_common_lib.h"
-#include"spdm_requester_lib.h"
-// #include <library/spdm_transport_pcidoe_lib.h>
+#include "spdm_common_lib.h"
+#include "spdm_requester_lib.h"
+#include "memlib.h"
 #include <library/spdm_transport_mctp_lib.h>
 #include "uio_requester_aux.h"
 
@@ -52,12 +52,12 @@ void uio_requester_write_to_tamper(uint32_t v) {
   bar0[SPDMDEV_MEAS_TAMPER_ADDR] = v;
 }
 
-return_status
+libspdm_return_t
 spdm_uio_send_message (
-  IN     void                    *spdm_context,
-  IN     uintn                   request_size,
-  IN     void                    *request,
-  IN     uint64                  timeout
+      void                    *spdm_context,
+      size_t                   request_size,
+      const void              *request,
+      uint64_t                  timeout
   )
 {
   volatile uint8_t *bar8bit;
@@ -66,15 +66,15 @@ spdm_uio_send_message (
 
   if (request_size > SPDMDEV_MAX_BUF) {
     bar0[SPDMDEV_TXRX_DATA_SIZEADDR] = 0;
-    ERROR_PRINT("Request_size too large (%llu)\n", request_size);
-    return RETURN_DEVICE_ERROR;
+    ERROR_PRINT("Request_size too large (%lu)\n", request_size);
+    return LIBSPDM_STATUS_SEND_FAIL;
   }
   bar0[SPDMDEV_TXRX_DATA_SIZEADDR] = request_size;
 
   status = bar0[SPDMDEV_TXRX_CTRL_ADDR];
   if (status & SPDMDEV_TX_TO_DEV || status & SPDMDEV_TX_TO_OS) {
     ERROR_PRINT("Wrong SPDMDEV_TXRX_CTRL_ADDR flags (0x%X)\n", status);
-    return RETURN_DEVICE_ERROR;
+    return LIBSPDM_STATUS_SEND_FAIL;
   }
 
   bar0[SPDMDEV_TXRX_CTRL_ADDR] |= SPDMDEV_TX_TO_DEV;
@@ -82,20 +82,20 @@ spdm_uio_send_message (
   bar8bit = (volatile uint8_t *) (bar0 + SPDMDEV_TXRX_DATA_ADDR);
   for(i=0; i< request_size; i++) {
     // INFO_PRINT("bar8bit[0x%X] = 0x%X\n", i, ((uint8*)request)[i]);
-    bar8bit[i] = ((uint8*)request)[i];
+    bar8bit[i] = ((uint8_t*)request)[i];
   }
 
   bar0[SPDMDEV_TXRX_CTRL_ADDR] |= SPDMDEV_TX_TO_DEV_DONE;
 
-  return RETURN_SUCCESS;
+  return LIBSPDM_STATUS_SUCCESS;
 }
 
-return_status
+libspdm_return_t
 spdm_uio_receive_message (
-  IN     void                    *spdm_context,
-  IN OUT uintn                   *response_size,
-  IN OUT void                    *response,
-  IN     uint64                  timeout
+  void                    *spdm_context,
+  size_t                   *response_size,
+  void                    **response,
+  uint64_t                  timeout
   )
 {
   volatile uint8_t *bar8bit;
@@ -116,16 +116,18 @@ spdm_uio_receive_message (
 
       if (bar0[SPDMDEV_TXRX_DATA_SIZEADDR] > *response_size) {
         ERROR_PRINT("SPDMDEV_TXRX_DATA_SIZEADDR too large (%u)\n", bar0[SPDMDEV_TXRX_DATA_SIZEADDR]);
-        return RETURN_DEVICE_ERROR;
+        return LIBSPDM_STATUS_RECEIVE_FAIL;
       }
 
       *response_size = bar0[SPDMDEV_TXRX_DATA_SIZEADDR];
 
       bar8bit = (volatile uint8_t *) (bar0 + SPDMDEV_TXRX_DATA_ADDR);
       for(i=0; i< *response_size; i++) {
-        ((uint8*)response)[i] = bar8bit[i];
+        ((uint8_t*)*response)[i] = bar8bit[i];
         // INFO_PRINT("Response[0x%X] = %X\n", i, ((uint8*)response)[i]);
       }
+
+      // DUMP_ARRAY("", *response, *response_size);
 
       bar0[SPDMDEV_TXRX_CTRL_ADDR] &= ~(SPDMDEV_TX_TO_OS | SPDMDEV_TX_TO_OS_DONE);
       break;
@@ -146,7 +148,8 @@ spdm_uio_receive_message (
   if (err != 1) {
     perror("config write:");
   }
-  return RETURN_SUCCESS;
+
+  return LIBSPDM_STATUS_SUCCESS;
 }
 
 static long
@@ -160,7 +163,58 @@ perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
     return ret;
 }
 
-return_status uio_requester_init (struct uio_requester_t *uior) {
+
+/*
+ * SPDM acquire sender buffer
+ * */
+libspdm_return_t spdm_device_acquire_sender_buffer (
+  void *context, void **msg_buf_ptr)
+{
+  *msg_buf_ptr = (void *)malloc(SPDMDEV_MAX_BUF);
+  if (*msg_buf_ptr == NULL)
+    return LIBSPDM_STATUS_ACQUIRE_FAIL;
+
+  return LIBSPDM_STATUS_SUCCESS;
+}
+
+/*
+ * SPDM release sender buffer
+ * */
+void spdm_device_release_sender_buffer (
+  void *context, const void *msg_buf_ptr)
+{
+  if (msg_buf_ptr != NULL)
+    free((void *)msg_buf_ptr);
+
+  return;
+}
+
+/*
+ * SPDM acquire receiver buffer
+ * */
+libspdm_return_t spdm_device_acquire_receiver_buffer (
+  void *context, void **msg_buf_ptr)
+{
+  *msg_buf_ptr = (void *)malloc(SPDMDEV_MAX_BUF);
+  if (*msg_buf_ptr == NULL)
+    return LIBSPDM_STATUS_ACQUIRE_FAIL;
+
+  return LIBSPDM_STATUS_SUCCESS;
+}
+
+/*
+ * SPDM release receiver buffer
+ * */
+void spdm_device_release_receiver_buffer (
+  void *context, const void *msg_buf_ptr)
+{
+  if (msg_buf_ptr != NULL)
+    free((void *)msg_buf_ptr);
+
+  return;
+}
+
+libspdm_return_t uio_requester_init (struct uio_requester_t *uior) {
   int err;
   int i;
   struct perf_event_attr pe;
@@ -168,20 +222,20 @@ return_status uio_requester_init (struct uio_requester_t *uior) {
   uiofd = open("/dev/uio0", O_RDWR);
   if (uiofd < 0) {
     perror("uio open:");
-    return RETURN_DEVICE_ERROR;
+    return LIBSPDM_STATUS_INVALID_STATE_LOCAL;
   }
 
   configfd = open("/sys/class/uio/uio0/device/config", O_RDWR);
   if (configfd < 0) {
     perror("config open:");
-    return RETURN_DEVICE_ERROR;
+    return LIBSPDM_STATUS_INVALID_STATE_LOCAL;
   }
 
   /* Read and cache command value */
   err = pread(configfd, &command_high, 1, 5);
   if (err != 1) {
     perror("command config read:");
-    return RETURN_DEVICE_ERROR;
+    return LIBSPDM_STATUS_INVALID_STATE_LOCAL;
   }
   command_high &= ~0x4;
 
@@ -189,14 +243,14 @@ return_status uio_requester_init (struct uio_requester_t *uior) {
   bar0fd = open("/sys/class/uio/uio0/device/resource0", O_RDWR);
   if (bar0fd < 0) {
     perror("bar0fd open:");
-    return RETURN_DEVICE_ERROR;
+    return LIBSPDM_STATUS_INVALID_STATE_LOCAL;
   }
 
   /* Mmap the device's BAR */
   bar0 = (volatile uint32_t *)mmap(NULL, SPDM_IO_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, bar0fd, 0);
   if (bar0 == MAP_FAILED) {
     perror("Error mapping bar0!");
-    return RETURN_DEVICE_ERROR;
+    return LIBSPDM_STATUS_INVALID_STATE_LOCAL;
   }
   INFO_PRINT("Version = %08X\n", bar0[SPDM_CARD_VERSION_ADDR]);
 
@@ -236,7 +290,7 @@ return_status uio_requester_init (struct uio_requester_t *uior) {
   err = pwrite(configfd, &command_high, 1, 5);
   if (err != 1) {
     perror("config write:");
-    return RETURN_DEVICE_ERROR;
+    return LIBSPDM_STATUS_INVALID_STATE_LOCAL;
   }
 
   uior->spdm_context = NULL;
@@ -257,7 +311,7 @@ return_status uio_requester_init (struct uio_requester_t *uior) {
   uior->fd_cycles = perf_event_open(&pe, 0, -1, -1, 0);
   if (uior->fd_cycles == -1) {
       ERROR_PRINT("Error opening perf leader fd %llx\n", pe.config);
-      return RETURN_DEVICE_ERROR;
+      return LIBSPDM_STATUS_INVALID_STATE_LOCAL;
   }
 
   pe.type = PERF_TYPE_SOFTWARE;
@@ -266,7 +320,7 @@ return_status uio_requester_init (struct uio_requester_t *uior) {
   uior->fd_taskclock = perf_event_open(&pe, 0, -1, uior->fd_cycles, 0);
   if (uior->fd_taskclock == -1) {
       ERROR_PRINT("Error opening perf TASK_CLOCK fd %llx\n", pe.config);
-      return RETURN_DEVICE_ERROR;
+      return LIBSPDM_STATUS_INVALID_STATE_LOCAL;
   }
 
   pe.type = PERF_TYPE_HARDWARE;
@@ -275,56 +329,116 @@ return_status uio_requester_init (struct uio_requester_t *uior) {
   uior->fd_instructions = perf_event_open(&pe, 0, -1, uior->fd_cycles, 0);
   if (uior->fd_instructions == -1) {
       ERROR_PRINT("Error opening perf INSTRUCTIONS fd %llx\n", pe.config);
-      return RETURN_DEVICE_ERROR;
+      return LIBSPDM_STATUS_INVALID_STATE_LOCAL;
   }
 
-  return RETURN_SUCCESS;
+  return LIBSPDM_STATUS_SUCCESS;
 }
 
 void *uio_requester_init_spdm (void) {
   void *spdm_context;
-  spdm_data_parameter_t        parameter;
-  uint8                        data8;
-  uint16                       data16;
-  uint32                       data32;
+  libspdm_data_parameter_t      parameter;
+  spdm_version_number_t         spdm_version;
+  uint8_t                       data8;
+  uint16_t                      data16;
+  uint32_t                      data32;
+  size_t scratch_buffer_size;
+  void *scratch_buffer;
 
-  spdm_context = (void *)malloc (spdm_get_context_size());
+  spdm_context = (void *)malloc (libspdm_get_context_size());
   if (spdm_context == NULL) {
     return NULL;
   }
-  spdm_init_context (spdm_context);
+  libspdm_init_context (spdm_context);
 
-  spdm_register_device_io_func (spdm_context, spdm_uio_send_message, spdm_uio_receive_message);
-  // spdm_register_transport_layer_func (spdm_context, spdm_transport_pci_doe_encode_message, spdm_transport_pci_doe_decode_message);
-  spdm_register_transport_layer_func (spdm_context, spdm_transport_mctp_encode_message, spdm_transport_mctp_decode_message);
+  libspdm_register_device_io_func (spdm_context, spdm_uio_send_message, spdm_uio_receive_message);
+
+  if (m_use_transport_layer == SOCKET_TRANSPORT_TYPE_MCTP) {
+    libspdm_register_transport_layer_func(
+      spdm_context,
+      SPDMDEV_MAX_BUF - LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE - LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE, //LIBSPDM_MAX_SPDM_MSG_SIZE,
+      LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE,
+      LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE,
+      libspdm_transport_mctp_encode_message,
+      libspdm_transport_mctp_decode_message);
+  } else {
+    ERROR_PRINT("SPDM transfer type not supported.\n");
+    return NULL;
+  }
+
+  libspdm_register_device_buffer_func(
+    spdm_context,
+    SPDMDEV_MAX_BUF,
+    SPDMDEV_MAX_BUF,
+    spdm_device_acquire_sender_buffer,
+    spdm_device_release_sender_buffer,
+    spdm_device_acquire_receiver_buffer,
+    spdm_device_release_receiver_buffer
+  );
+
+  scratch_buffer_size = libspdm_get_sizeof_required_scratch_buffer(spdm_context);
+  scratch_buffer = (void *)malloc(scratch_buffer_size);
+  if (scratch_buffer == NULL) {
+    ERROR_PRINT("Could not allocate scratch_buffer.\n");
+    free(spdm_context);
+    spdm_context = NULL;
+    return NULL;
+  }
+  libspdm_set_scratch_buffer(spdm_context, scratch_buffer, scratch_buffer_size);
+
+  if (m_use_version != 0) {
+    libspdm_zero_mem(&parameter, sizeof(parameter));
+    parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+    spdm_version = m_use_version << SPDM_VERSION_NUMBER_SHIFT_BIT;
+    libspdm_set_data(spdm_context, LIBSPDM_DATA_SPDM_VERSION, &parameter,
+            &spdm_version, sizeof(spdm_version));
+  }
+
+  if (m_use_secured_message_version != 0) {
+    libspdm_zero_mem(&parameter, sizeof(parameter));
+    parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+    spdm_version = m_use_secured_message_version << SPDM_VERSION_NUMBER_SHIFT_BIT;
+    libspdm_set_data(spdm_context,
+            LIBSPDM_DATA_SECURED_MESSAGE_VERSION,
+            &parameter, &spdm_version,
+            sizeof(spdm_version));
+  } else {
+    libspdm_set_data(spdm_context,
+            LIBSPDM_DATA_SECURED_MESSAGE_VERSION,
+            &parameter, NULL, 0);
+  }
 
   data8 = 0;
-  zero_mem (&parameter, sizeof(parameter));
-  parameter.location = SPDM_DATA_LOCATION_LOCAL;
-  spdm_set_data (spdm_context, SPDM_DATA_CAPABILITY_CT_EXPONENT, &parameter, &data8, sizeof(data8));
+  libspdm_zero_mem (&parameter, sizeof(parameter));
+  parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+  libspdm_set_data (spdm_context, LIBSPDM_DATA_CAPABILITY_CT_EXPONENT, &parameter, &data8, sizeof(data8));
 
   data32 = m_use_requester_capability_flags;
   if (m_use_capability_flags != 0) {
     data32 = m_use_capability_flags;
   }
-  spdm_set_data (spdm_context, SPDM_DATA_CAPABILITY_FLAGS, &parameter, &data32, sizeof(data32));
+  libspdm_set_data (spdm_context, LIBSPDM_DATA_CAPABILITY_FLAGS, &parameter, &data32, sizeof(data32));
 
   data8 = m_support_measurement_spec;
-  spdm_set_data (spdm_context, SPDM_DATA_MEASUREMENT_SPEC, &parameter, &data8, sizeof(data8));
+  libspdm_set_data (spdm_context, LIBSPDM_DATA_MEASUREMENT_SPEC, &parameter, &data8, sizeof(data8));
   data32 = m_support_measurement_hash_algo;
-  spdm_set_data (spdm_context, SPDM_DATA_MEASUREMENT_HASH_ALGO, &parameter, &data32, sizeof(data32));
+  libspdm_set_data (spdm_context, LIBSPDM_DATA_MEASUREMENT_HASH_ALGO, &parameter, &data32, sizeof(data32));
   data32 = m_support_asym_algo;
-  spdm_set_data (spdm_context, SPDM_DATA_BASE_ASYM_ALGO, &parameter, &data32, sizeof(data32));
+  libspdm_set_data (spdm_context, LIBSPDM_DATA_BASE_ASYM_ALGO, &parameter, &data32, sizeof(data32));
   data32 = m_support_hash_algo;
-  spdm_set_data (spdm_context, SPDM_DATA_BASE_HASH_ALGO, &parameter, &data32, sizeof(data32));
+  libspdm_set_data (spdm_context, LIBSPDM_DATA_BASE_HASH_ALGO, &parameter, &data32, sizeof(data32));
   data16 = m_support_dhe_algo;
-  spdm_set_data (spdm_context, SPDM_DATA_DHE_NAME_GROUP, &parameter, &data16, sizeof(data16));
+  libspdm_set_data (spdm_context, LIBSPDM_DATA_DHE_NAME_GROUP, &parameter, &data16, sizeof(data16));
   data16 = m_support_aead_algo;
-  spdm_set_data (spdm_context, SPDM_DATA_AEAD_CIPHER_SUITE, &parameter, &data16, sizeof(data16));
+  libspdm_set_data (spdm_context, LIBSPDM_DATA_AEAD_CIPHER_SUITE, &parameter, &data16, sizeof(data16));
   data16 = m_support_req_asym_algo;
-  spdm_set_data (spdm_context, SPDM_DATA_REQ_BASE_ASYM_ALG, &parameter, &data16, sizeof(data16));
+  libspdm_set_data (spdm_context, LIBSPDM_DATA_REQ_BASE_ASYM_ALG, &parameter, &data16, sizeof(data16));
   data16 = m_support_key_schedule_algo;
-  spdm_set_data (spdm_context, SPDM_DATA_KEY_SCHEDULE, &parameter, &data16, sizeof(data16));
+  libspdm_set_data (spdm_context, LIBSPDM_DATA_KEY_SCHEDULE, &parameter, &data16, sizeof(data16));
+  data8 = SPDM_ALGORITHMS_OPAQUE_DATA_FORMAT_1;
+  libspdm_set_data(spdm_context, LIBSPDM_DATA_OTHER_PARAMS_SUPPORT, &parameter, &data8, sizeof(data8));
+  data8 = SPDM_MEL_SPECIFICATION_DMTF;
+  libspdm_set_data(spdm_context, LIBSPDM_DATA_MEL_SPEC, &parameter, &data8, sizeof(data8));
 
   return spdm_context;
 }

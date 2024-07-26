@@ -45,6 +45,9 @@ struct VirtIOBlkConf
 struct VirtIOBlockDataPlane;
 
 struct VirtIOBlockReq;
+
+#define SPDMDEV_MAX_BUF             (4096*4)
+
 typedef struct VirtIOBlock {
     VirtIODevice parent_obj;
     BlockBackend *blk;
@@ -62,6 +65,16 @@ typedef struct VirtIOBlock {
     // SPDM variables
     QemuThread spdm_io_thread;
     void* spdm_context;
+    QemuMutex spdm_io_mutex;
+    QemuCond spdm_io_cond;
+    uint8_t spdm_buf[SPDMDEV_MAX_BUF];
+    uint32_t spdm_buf_size;
+    int spdm_send_is_ready;
+    int spdm_receive_is_ready;
+    uint64_t remaining_bits;
+    uint8_t in_danger;
+    uint8_t wrapped;
+    void *scratch_buffer;
 } VirtIOBlock;
 
 typedef struct VirtIOBlockReq {

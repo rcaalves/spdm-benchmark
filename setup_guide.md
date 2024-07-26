@@ -3,7 +3,7 @@
 ## Basic packages needed
 ```console
 $ sudo apt install git build-essential cmake # build tools
-$ sudo apt install libgtk-3-0-dev nettle-dev libsdl2-dev libjemalloc-dev libcap-dev libattr1-dev linux-kvm # libraries needed for QEMU
+$ sudo apt install libgtk-3-dev nettle-dev libsdl2-dev libjemalloc-dev libcap-dev libattr1-dev linux-kvm # libraries needed for QEMU
 $ sudo apt install libncurses5-dev libncursesw5-dev # to enable menuconfig
 $ sudo apt install flex bison # optional packages QEMU
 ```
@@ -27,7 +27,12 @@ $ tar xvvf buildroot-2020.02.9.tar.bz2
 $ cd buildroot-2020.02.9
 $ make qemu_x86_64_defconfig
 $ make menuconfig
-<Inside the Toolchain menu, check "Enable C++ support" option. Save and exit.>
+$ # Enable the following options:
+$ # Toolchain -> Enable C++ support
+$ # Target packages -> Networking applications -> ethtool
+$ # Target packages -> Networking applications -> nginx
+$ # Target packages -> Debugging, profiling and benchmark -> netperf
+$ # Target packages -> Debugging, profiling and benchmark -> iperf3
 $ make
 ```
 
@@ -43,11 +48,10 @@ $ git checkout dc48779a5b8c9199b01549311922e05429af2a0e
 $ git submodule update --init --recursive
 ```
 
-* Apply the patches from `libspdm_patches` and update mbedtls config file
+* Apply the patches from `libspdm_patches`
 ```console
 <in libspdm directory>
 $ git am --3way --ignore-space-change --keep-cr /path/to/libspdm_patches/0*.patch
-$ cp /path/to/libspdm_patches/config.h os_stub/mbedtlslib/include/mbedtls/
 ```
 
 * For the purposes os performance analysis, it is recomended to remove any unecessary messages.
@@ -115,12 +119,21 @@ $ # Save and exit.
 ```
 
 * Copy SPDM-related modifications to the kernel code tree
-```console
-cp -r /path/to/kernel_hd/drivers /path/to/buildroot-2020.02.9/output/build/linux-4.19.91/
-cp -r /path/to/kernel_hd/include /path/to/buildroot-2020.02.9/output/build/linux-4.19.91/
-```
+	1. libspdm files
+	```console
+	cp -r /path/to/hpe-sdm/kernel_libspdm/lib /path/to/buildroot-2020.02.9/output/build/linux-4.19.91/
+	```
+	1. HD related modifications
+	```console
+	cp -r /path/to/hpe-sdm/kernel_hd/drivers /path/to/buildroot-2020.02.9/output/build/linux-4.19.91/
+	cp -r /path/to/hpe-sdm/kernel_hd/include /path/to/buildroot-2020.02.9/output/build/linux-4.19.91/
+	cp -r /path/to/hpe-sdm/kernel_hd/block /path/to/buildroot-2020.02.9/output/build/linux-4.19.91/
+	```
+	1. E1000 related modifications
+	cp -r /path/to/hpe-sdm/kernel_e1000/drivers /path/to/buildroot-2020.02.9/output/build/linux-4.19.91/
+	```
 
-* Rebuild Buildroot, indicating libspdm location
+* Rebuild Buildroot kernel, indicating libspdm location
 ```console
 $ SPDM_DIR=/path/to/libspdm SPDM_BUILD_DIR=/path/to/libspdm/build_buildroot make
 ```
@@ -136,7 +149,7 @@ $ git switch stable-4.1
 
 * Copy new and modified files
 ```
-$ cp -r /path/to/git/qemu_files /path/to/qemu
+$ cp -r /path/to/git/qemu_files/* /path/to/qemu
 ```
 
 * Build qemu
@@ -167,7 +180,7 @@ $ ln -s /path/to/libspdm/build_x64/bin/rsa3072
 #### If 9p filesystem was enabled in the buildroot kernel:
   * Create a directory to be shared between host and guest `mkdir qemu_shared`
   * Copy uio_requester_bench to the directory `cp /path/to/uio_requester/uio_requester_bench /path_to/qemu_shared`
-  * Copy the certificates to the same directory `cp -r /path/to/libspdm/buil_buildroot_userspace/bin/{ecp384,rsa3072} /path_to/qemu_shared`
+  * Copy the certificates to the same directory `cp -r /path/to/libspdm/build_buildroot_userspace/bin/{ecp384,rsa3072} /path_to/qemu_shared`
   * Run QEMU
 ```console
 $ cd /path/to/qemu/build
@@ -306,3 +319,36 @@ Then recompile the kernel (`make linux-rebuild`). No changes in QEMU are needed.
 ### Extracting statistics and generating graphs
 
 * Follow instructions in kernel_hd/benchmark/readme.md
+
+## Running E1000 (network card) experiments on QEMU
+
+### Running QEMU
+
+* Change cpu configurations to reduce clock scaling effects (as mentioned above)
+
+* Prepare a set of files to be used in the file transfer test. The size of the files are arbitrary. We used 5k, 10k, 50k, 100k, 500k, 1M, 5M, 10M, 50M, and 100M. We generated these files by reading from /dev/urandom
+
+* Run QEMU with an E1000 card
+```console
+$ cd /path/to/qemu/build
+$ ./x86_64-softmmu/qemu-system-x86_64 -enable-kvm -cpu qemu64,pmu=on \
+	-virtfs local,path=/path/to/qemu_shared/,mount_tag=host0,security_model=mapped,id=host0 \
+	-drive file=/path/to/benchmarkdisk,if=virtio,format=raw
+	-kernel /path/to/buildroot-2020.02.9/output/images/bzImage \
+	-drive file=/path/to/buildroot-2020.02.9/output/images/rootfs.ext2,if=ide,format=raw \
+	-append "console=ttyS0 rootwait root=/dev/sda" \
+	-netdev user,id=net0,hostfwd=tcp::5555-:80 \
+	-m 1024
+```
+
+* The parameter hostfwd=tcp::5555-:80 forwards TCP connections on host port 5555 to guest port 80
+
+### Running scripts, extracting statistics and generating graphs
+
+* Follow instructions in hpe-spdm/kernel_e1000/benchmark/readme.md
+
+
+```
+
+
+

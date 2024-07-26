@@ -3,13 +3,10 @@
 #include <linux/slab.h>		/* kmalloc() */
 #include <linux/completion.h>
 #include <linux/random.h>
+#include <linux/string.h>
 
-#pragma GCC diagnostic ignored "-Wundef"
-#ifdef ARRAY_SIZE
-#undef ARRAY_SIZE
-#endif
 #include "spdm_common_lib.h"
-#pragma GCC diagnostic pop
+
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -28,7 +25,7 @@ struct tm *gmtime(const time_t *timep) {
 }
 
 
-void __assert(boolean x) {
+void __assert(bool x) {
 	DECLARE_COMPLETION(my_completion);
 	if (!x) {
     printk("Oh no, your __assert failed!");
@@ -78,9 +75,42 @@ int putchar(int c){
 
 // Function used to read certificates from disk.
 // Such functions should not be used or a work aroud shoud be implement here
-boolean read_input_file(IN char8 *file_name, OUT void **file_data,
-                        OUT uintn *file_size) {
-	return FALSE;
+// bool read_input_file(IN char8 *file_name, OUT void **file_data,
+//                         OUT size_t *file_size) {
+// 	return false;
+// }
+
+bool libspdm_read_input_file(const char *file_name, void **file_data,
+                             size_t *file_size)
+{
+  return false;
+}
+
+bool libspdm_write_output_file(const char *file_name, const void *file_data,
+                               size_t file_size) {
+  return false;
+}
+
+int open(const char *pathname, int flags) {
+  return 0;
+}
+
+// puts
+
+ssize_t read(int fd, void *buf, size_t count) {
+  return 0;
+}
+
+ssize_t write(int fd, const void *buf, size_t count) {
+  return 0;
+}
+
+int close(int fd) {
+    return 0;
+}
+
+void explicit_bzero(void *s, size_t n) {
+  memzero_explicit(s, n);
 }
 
 // not required if MBEDTLS_NO_PLATFORM_ENTROPY is enabled
@@ -97,8 +127,8 @@ boolean read_input_file(IN char8 *file_name, OUT void **file_data,
 //     return 0 ;
 // }
 
-void dump_hex_str(IN uint8 *buffer, IN uintn buffer_size) {
-	uintn i;
+void libspdm_dump_hex_str(const uint8_t *buffer, size_t buffer_size) {
+	size_t i;
 	printk(KERN_ALERT "dump_hex_str ");
 	for (i = 0; i < buffer_size; i++) {
 		printk(KERN_CONT "%02X ", buffer[i]);

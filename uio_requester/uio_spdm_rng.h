@@ -3,11 +3,11 @@
 
 typedef struct {
   mctp_message_header_t  mctp_header;
-  uint8  req;
-  uint64 padding;
+  uint8_t  req;
+  uint64_t padding;
 } SECURE_SESSION_REQUEST_RNG;
 
 typedef struct {
   mctp_message_header_t        mctp_header;
-  uint32					   rng;
+  uint32_t					   rng;
 } SECURE_SESSION_RESPONSE_RNG;

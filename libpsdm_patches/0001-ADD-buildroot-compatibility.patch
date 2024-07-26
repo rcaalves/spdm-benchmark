@@ -1,0 +1,264 @@
+From c2bfd53605861301a6dc6ff30054789891909ee0 Mon Sep 17 00:00:00 2001
+From: rcaalves <myeyeismadeofglass@gmail.com>
+Date: Thu, 11 Apr 2024 16:32:05 -0300
+Subject: [PATCH] ADD: buildroot compatibility
+
+---
+ CMakeLists.txt                              | 67 ++++++++++++++++++++-
+ include/hal/library/responder/setcertlib.h  |  2 +-
+ os_stub/mbedtlslib/include/mbedtls/config.h | 23 ++++---
+ os_stub/rnglib/CMakeLists.txt               |  4 ++
+ os_stub/spdm_device_secret_lib_sample/lib.c |  6 +-
+ 5 files changed, 85 insertions(+), 17 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9c300cc817..1b8880dbc2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -65,6 +65,10 @@ endif()
+ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+     if(TOOLCHAIN STREQUAL "GCC")
+         MESSAGE("TOOLCHAIN = GCC")
++    elseif(TOOLCHAIN STREQUAL "BUILDROOT")
++        MESSAGE("TOOLCHAIN = BUILDROOT")
++    elseif(TOOLCHAIN STREQUAL "BUILDROOT_USERSPACE")
++        MESSAGE("TOOLCHAIN = BUILDROOT_USERSPACE")
+     elseif(TOOLCHAIN STREQUAL "CLANG")
+         MESSAGE("TOOLCHAIN = CLANG")
+     elseif(TOOLCHAIN STREQUAL "CBMC")
+@@ -242,6 +246,65 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+         endif()
+         SET(CMAKE_C_LINK_EXECUTABLE "<CMAKE_LINKER> <LINK_FLAGS> <OBJECTS> -o <TARGET> -Wl,--start-group <LINK_LIBRARIES> -Wl,--end-group")
+ 
++    elseif(TOOLCHAIN STREQUAL "BUILDROOT")
++        SET(CMAKE_C_COMPILER x86_64-buildroot-linux-uclibc-gcc)
++        SET(CMAKE_C_FLAGS "-g -D__KERNEL__ -Wall  -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar  -Wno-format-security -std=gnu89 -fno-PIE -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -m64 -falign-jumps=1 -falign-loops=1 -mno-80387 -mno-fp-ret-in-387 -mpreferred-stack-boundary=3 -mskip-rax-setup -mtune=generic -mno-red-zone -mcmodel=kernel -funit-at-a-time -DCONFIG_AS_CFI=1 -DCONFIG_AS_CFI_SIGNAL_FRAME=1 -DCONFIG_AS_CFI_SECTIONS=1 -DCONFIG_AS_FXSAVEQ=1 -DCONFIG_AS_SSSE3=1 -DCONFIG_AS_CRC32=1 -DCONFIG_AS_AVX=1 -DCONFIG_AS_AVX2=1 -DCONFIG_AS_AVX512=1 -DCONFIG_AS_SHA1_NI=1 -DCONFIG_AS_SHA256_NI=1  -pipe -Wno-sign-compare -fno-asynchronous-unwind-tables -mindirect-branch=thunk-extern -mindirect-branch-register -fno-jump-tables -fno-delete-null-pointer-checks -O2 --param=allow-store-data-races=0 -Wframe-larger-than=2048 -fno-stack-protector -Wno-unused-but-set-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-var-tracking-assignments -Wdeclaration-after-statement -Wno-pointer-sign -fno-strict-overflow -fno-merge-all-constants -fmerge-constants -fno-stack-check -fconserve-stack -Werror=implicit-int  -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -D_GNU_SOURCE -U_GNU_SOURCE") #  -Wstrict-prototypes -Werror=strict-prototypes
++        SET(MBEDTLS_FLAGS "-std=gnu99")
++        SET(OPENSSL_FLAGS "-include base.h -Wno-error=maybe-uninitialized -Wno-error=format -Wno-format -Wno-error=unused-but-set-variable")
++        SET(CMOCKA_FLAGS "-std=gnu99 -Wpedantic -Wall -Wshadow -Wmissing-prototypes -Wcast-align -Werror=address -Wstrict-prototypes -Werror=strict-prototypes -Wwrite-strings -Werror=write-strings -Werror-implicit-function-declaration -Wpointer-arith -Werror=pointer-arith -Wdeclaration-after-statement -Werror=declaration-after-statement -Wreturn-type -Werror=return-type -Wuninitialized -Werror=uninitialized -Werror=strict-overflow -Wstrict-overflow=2 -Wno-format-zero-length -Wmissing-field-initializers -Wformat-security -Werror=format-security -fno-common -Wformat -fno-common -mcmodel=kernel -static -fno-common -fno-exceptions -fno-non-call-exceptions")
++
++        SET(CMAKE_AR x86_64-buildroot-linux-uclibc-gcc-ar)
++
++        SET(CMAKE_LINKER x86_64-buildroot-linux-uclibc-gcc)
++        SET(CMAKE_EXE_LINKER_FLAGS " -Wno-error -mcmodel=kernel " )
++
++        SET(CMAKE_C_LINK_EXECUTABLE "<CMAKE_LINKER> <LINK_FLAGS> <OBJECTS> -o <TARGET> -Wl,--start-group <LINK_LIBRARIES> -Wl,--end-group")
++
++    elseif(TOOLCHAIN STREQUAL "BUILDROOT_USERSPACE")
++        SET(CMAKE_C_COMPILER x86_64-buildroot-linux-uclibc-gcc)
++        ADD_COMPILE_OPTIONS(-std=c99 -fshort-wchar -fno-strict-aliasing -Wall -Werror -Wno-array-bounds -ffunction-sections -fdata-sections -fno-common -Wno-address  -fno-asynchronous-unwind-tables   -Wno-maybe-uninitialized -Wno-uninitialized  -Wno-builtin-declaration-mismatch -Wno-nonnull-compare -Werror-implicit-function-declaration -Wcast-qual -Wcast-align)
++        if (ARCH STREQUAL "x64")
++            ADD_COMPILE_OPTIONS(-mno-red-zone)
++        endif()
++        if (ARCH STREQUAL "x64" OR "ia32")
++            ADD_COMPILE_OPTIONS(-maccumulate-outgoing-args)
++        endif()
++        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
++            ADD_COMPILE_OPTIONS(-g)
++        endif()
++        if(STACK_USAGE STREQUAL "ON")
++            ADD_COMPILE_OPTIONS(-fstack-usage)
++        else()
++            ADD_COMPILE_OPTIONS(-flto)
++        endif()
++        if(GCOV STREQUAL "ON")
++        ADD_COMPILE_OPTIONS(--coverage -fprofile-arcs -ftest-coverage)
++        endif()
++        SET(OPENSSL_FLAGS -include base.h -Wno-error=maybe-uninitialized -Wno-error=format -Wno-format -Wno-error=unused-but-set-variable -Wno-cast-qual)
++        if(STACK_USAGE STREQUAL "ON")
++            SET(OPENSSL_FLAGS ${OPENSSL_FLAGS} -fstack-usage)
++        endif()
++        SET(CMOCKA_FLAGS -std=gnu99 -Wpedantic -Wall -Wshadow -Wmissing-prototypes -Wcast-align -Werror=address -Wstrict-prototypes -Werror=strict-prototypes -Wwrite-strings -Werror=write-strings -Werror-implicit-function-declaration -Wpointer-arith -Werror=pointer-arith -Wdeclaration-after-statement -Werror=declaration-after-statement -Wreturn-type -Werror=return-type -Wuninitialized -Werror=uninitialized -Werror=strict-overflow -Wstrict-overflow=2 -Wno-format-zero-length -Wmissing-field-initializers -Wformat-security -Werror=format-security -fno-common -Wformat -fno-common -Wno-cast-qual)
++        if(STACK_USAGE STREQUAL "ON")
++            SET(CMOCKA_FLAGS ${CMOCKA_FLAGS} -fstack-usage)
++        endif()
++
++        SET(CMAKE_AR x86_64-buildroot-linux-uclibc-gcc-ar)
++
++        if(NOT CMAKE_C_COMPILER_VERSION VERSION_GREATER 9.2)
++                SET(CMAKE_C_ARCHIVE_FINISH true)
++        endif()
++
++        SET(CMAKE_LINKER x86_64-buildroot-linux-uclibc-gcc)
++        # SET(CMAKE_EXE_LINKER_FLAGS "-flto -Wno-error -no-pie" )
++        SET(CMAKE_EXE_LINKER_FLAGS " -Wno-error " )
++        if(GCOV STREQUAL "ON")
++        SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}  --coverage -lgcov -fprofile-arcs -ftest-coverage")
++        endif()
++        SET(CMAKE_C_LINK_EXECUTABLE "<CMAKE_LINKER> <LINK_FLAGS> <OBJECTS> -o <TARGET> -Wl,--start-group <LINK_LIBRARIES> -Wl,--end-group")
++
++        SET(DISABLE_TESTS 1)
++
+     elseif(TOOLCHAIN STREQUAL "ARM_DS2022")
+         if(ARCH STREQUAL "aarch64")
+             SET(CMAKE_SYSTEM_NAME   Linux)
+@@ -645,7 +708,9 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+     endif()
+ 
+     if(ARCH STREQUAL "x64")
+-        ADD_COMPILE_OPTIONS(-m64 -mcmodel=small)
++        if(NOT TOOLCHAIN STREQUAL "BUILDROOT")
++            ADD_COMPILE_OPTIONS(-m64 -mcmodel=small)
++        endif()
+     elseif(ARCH STREQUAL "ia32")
+         ADD_COMPILE_OPTIONS(-m32)
+         SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -m32" )
+diff --git a/include/hal/library/responder/setcertlib.h b/include/hal/library/responder/setcertlib.h
+index 42efc48b1c..8772c12b03 100644
+--- a/include/hal/library/responder/setcertlib.h
++++ b/include/hal/library/responder/setcertlib.h
+@@ -19,7 +19,7 @@
+  * @retval  true   It is in a trusted environment.
+  * @retval  false  It is not in a trusted environment.
+  **/
+-extern bool libspdm_is_in_trusted_environment();
++extern bool libspdm_is_in_trusted_environment(void);
+ 
+ /**
+  * Stores or erase a certificate chain in non-volatile memory.
+diff --git a/os_stub/mbedtlslib/include/mbedtls/config.h b/os_stub/mbedtlslib/include/mbedtls/config.h
+index 82507ea477..067620f22f 100644
+--- a/os_stub/mbedtlslib/include/mbedtls/config.h
++++ b/os_stub/mbedtlslib/include/mbedtls/config.h
+@@ -66,7 +66,7 @@
+  *
+  * Comment to disable the use of assembly code.
+  */
+-#define MBEDTLS_HAVE_ASM
++// #define MBEDTLS_HAVE_ASM
+ 
+ /**
+  * \def MBEDTLS_NO_UDBL_DIVISION
+@@ -94,7 +94,7 @@
+  * example, if double-width division is implemented in software, disabling
+  * it can reduce code size in some embedded targets.
+  */
+-/*#define MBEDTLS_NO_UDBL_DIVISION*/
++#define MBEDTLS_NO_UDBL_DIVISION
+ 
+ /**
+  * \def MBEDTLS_NO_64BIT_MULTIPLICATION
+@@ -140,7 +140,7 @@
+  *
+  * Comment if your system does not support time functions
+  */
+-#define MBEDTLS_HAVE_TIME
++// #define MBEDTLS_HAVE_TIME
+ 
+ /**
+  * \def MBEDTLS_HAVE_TIME_DATE
+@@ -161,7 +161,7 @@
+  * mbedtls_platform_gmtime_r() at compile-time by using the macro
+  * MBEDTLS_PLATFORM_GMTIME_R_ALT.
+  */
+-#define MBEDTLS_HAVE_TIME_DATE
++// #define MBEDTLS_HAVE_TIME_DATE
+ 
+ /**
+  * \def MBEDTLS_PLATFORM_MEMORY
+@@ -1482,7 +1482,7 @@ extern void my_free( void *ptr );
+  *
+  * Enable the checkup functions (*_self_test).
+  */
+-#define MBEDTLS_SELF_TEST
++// #define MBEDTLS_SELF_TEST
+ 
+ /**
+  * \def MBEDTLS_SHA256_SMALLER
+@@ -2309,7 +2309,7 @@ extern void my_free( void *ptr );
+  *
+  * This modules adds support for the AES-NI instructions on x86-64
+  */
+-#define MBEDTLS_AESNI_C
++// #define MBEDTLS_AESNI_C
+ 
+ /**
+  * \def MBEDTLS_AES_C
+@@ -2599,7 +2599,7 @@ extern void my_free( void *ptr );
+  * This module enables the AES-CCM ciphersuites, if other requisites are
+  * enabled as well.
+  */
+-/*#define MBEDTLS_CCM_C*/
++#define MBEDTLS_CCM_C
+ 
+ /**
+  * \def MBEDTLS_CERTS_C
+@@ -2825,7 +2825,7 @@ extern void my_free( void *ptr );
+  *
+  * This module provides a generic entropy pool
+  */
+-#define MBEDTLS_ENTROPY_C
++// #define MBEDTLS_ENTROPY_C
+ 
+ /**
+  * \def MBEDTLS_ERROR_C
+@@ -2984,7 +2984,7 @@ extern void my_free( void *ptr );
+  *            it, and considering stronger message digests instead.
+  *
+  */
+-/*#define MBEDTLS_MD5_C*/
++#define MBEDTLS_MD5_C
+ 
+ /**
+  * \def MBEDTLS_MEMORY_BUFFER_ALLOC_C
+@@ -3182,7 +3182,7 @@ extern void my_free( void *ptr );
+  *
+  * This module enables PKCS#12 functions.
+  */
+-/*#define MBEDTLS_PKCS12_C*/
++#define MBEDTLS_PKCS12_C
+ 
+ /**
+  * \def MBEDTLS_PLATFORM_C
+@@ -3323,7 +3323,7 @@ extern void my_free( void *ptr );
+  *            on it, and considering stronger message digests instead.
+  *
+  */
+-/*#define MBEDTLS_SHA1_C*/
++#define MBEDTLS_SHA1_C
+ 
+ /**
+  * \def MBEDTLS_SHA256_C
+@@ -3963,7 +3963,6 @@ extern int my_snprintf(char *str, size_t size, const char *format, ...);
+  */
+ #define MBEDTLS_PLATFORM_ZEROIZE_ALT
+ 
+-
+ /**
+  * Uncomment the macro to let Mbed TLS use your alternate implementation of
+  * mbedtls_platform_gmtime_r(). This replaces the default implementation in
+diff --git a/os_stub/rnglib/CMakeLists.txt b/os_stub/rnglib/CMakeLists.txt
+index c500986196..d9e6114646 100644
+--- a/os_stub/rnglib/CMakeLists.txt
++++ b/os_stub/rnglib/CMakeLists.txt
+@@ -9,6 +9,10 @@ set (src_rnglib "")
+ 
+ if(TOOLCHAIN STREQUAL "ARM_GNU_BARE_METAL" OR TOOLCHAIN STREQUAL "RISCV_NONE")
+     # The target must provide the required implementation at link time.
++elseif(TOOLCHAIN STREQUAL "BUILDROOT")
++SET(src_rnglib
++    rng_std.c
++)
+ elseif(CMAKE_SYSTEM_NAME MATCHES "Linux" AND NOT TOOLCHAIN STREQUAL "ARM_DS2022")
+ SET(src_rnglib
+     rng_linux.c
+diff --git a/os_stub/spdm_device_secret_lib_sample/lib.c b/os_stub/spdm_device_secret_lib_sample/lib.c
+index c3ccdf95c7..39380796d3 100644
+--- a/os_stub/spdm_device_secret_lib_sample/lib.c
++++ b/os_stub/spdm_device_secret_lib_sample/lib.c
+@@ -1794,9 +1794,9 @@ bool libspdm_psk_handshake_secret_hkdf_expand(
+     } else {
+         return false;
+     }
+-    printf("[PSK]: ");
+-    libspdm_dump_hex_str(psk, psk_size);
+-    printf("\n");
++    // printf("[PSK]: ");
++    // libspdm_dump_hex_str(psk, psk_size);
++    // printf("\n");
+ 
+     hash_size = libspdm_get_hash_size(base_hash_algo);
+ 
+-- 
+2.34.1
+

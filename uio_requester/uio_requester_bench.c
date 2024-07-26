@@ -5,8 +5,8 @@
 #include "uio_requester_aux.h"
 
 int main(int argc, char *argv[]) {
-  return_status           status = RETURN_SUCCESS;
-  struct uio_requester_t  uio_requester;
+  libspdm_return_t          status = LIBSPDM_STATUS_SUCCESS;
+  struct uio_requester_t    uio_requester;
 
   status = uio_requester_init(&uio_requester);
   CHECK_ERROR("Could not init...");
@@ -21,7 +21,7 @@ int main(int argc, char *argv[]) {
   }
 
   INFO_PRINT("\nspdm_init_connection");
-  status = uio_spdm_init_connection(&uio_requester, TRUE); // stats gathered inside
+  status = uio_spdm_init_connection(&uio_requester, true); // stats gathered inside
   CHECK_ERROR("spdm_init_connection() failed...");
 
   INFO_PRINT("\nspdm_uio_load_certificates");
@@ -31,7 +31,7 @@ int main(int argc, char *argv[]) {
   CHECK_ERROR ("spdm_uio_load_certificates error ");
 
   INFO_PRINT("\ndo_authentication_via_spdm");
-  status = uio_do_authentication_via_spdm (&uio_requester, TRUE); // stats gathered inside
+  status = uio_do_authentication_via_spdm (&uio_requester, true); // stats gathered inside
   CHECK_ERROR ("uio_do_authentication_via_spdm error ");
 
   INFO_PRINT("\ndo_measurement_via_spdm");
@@ -39,11 +39,11 @@ int main(int argc, char *argv[]) {
   CHECK_ERROR ("do_measurement_via_spdm error");
 
   INFO_PRINT("\ndo_session_via_spdm no PSK");
-  status = uio_do_session_via_spdm (&uio_requester, FALSE, &uio_do_rng_app_session_via_spdm); // stats gathered inside
+  status = uio_do_session_via_spdm (&uio_requester, false, &uio_do_rng_app_session_via_spdm); // stats gathered inside
   CHECK_ERROR ("do_session_via_spdm no PSK error");
 
   INFO_PRINT("\ndo_session_via_spdm PSK");
-  status = uio_do_session_via_spdm (&uio_requester, TRUE, &uio_do_rng_app_session_via_spdm); // stats gathered inside
+  status = uio_do_session_via_spdm (&uio_requester, true, &uio_do_rng_app_session_via_spdm); // stats gathered inside
   CHECK_ERROR ("do_session_via_spdm PSK error");
 
   INFO_PRINT("\nuio_requester_get_random_no_spdm");

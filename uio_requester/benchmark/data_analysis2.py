@@ -21,7 +21,7 @@ def plot(graph_name: str, format_name: str) -> None:
     ax1.bar(np.arange(len(values)) - width/2, df['Number of cycles'],
             width, yerr=df['NoC_IC'], color='red')
     print(df)
-    print(values[0])
+    # print(values[0])
     ax2 = ax1.twinx()
     ax2.bar(np.arange(len(values)) + width/2, df['Execution time'],
             width, yerr=df['ET_IC'], color='blue')

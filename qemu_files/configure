@@ -7458,12 +7458,11 @@ if test "$libspdm" = "yes" ; then
   echo "SPDM_CFLAGS = -flto -Wno-error -O0 \\" >> $config_host_mak
   echo "    -I $libspdm_headers \\" >> $config_host_mak
   echo "    -I $libspdm_headers/hal \\" >> $config_host_mak
-  echo "    -I $libspdm_headers/hal/x64 \\" >> $config_host_mak
   echo "    -I $libspdm_headers/library \\" >> $config_host_mak
   echo "    -I $libspdm_headers/industry_standard \\" >> $config_host_mak
-  echo "    -I $libspdm_src_dir/library/spdm_common_lib \\" >> $config_host_mak
-  echo "    -I $libspdm_src_dir/library/spdm_responder_lib \\" >> $config_host_mak
-  echo "    -I $libspdm_src_dir/os_stub/spdm_device_secret_lib " >> $config_host_mak
+  # echo "    -I $libspdm_src_dir/library/spdm_common_lib \\" >> $config_host_mak
+  echo "    -I $libspdm_src_dir/os_stub/ \\" >> $config_host_mak
+  echo "    -I $libspdm_src_dir/os_stub/spdm_device_secret_lib_sample " >> $config_host_mak
 
 
   echo "SPDM_LIBS = -fprofile-arcs \\" >> $config_host_mak
@@ -7472,13 +7471,18 @@ if test "$libspdm" = "yes" ; then
   echo "    $libspdm_build_dir/lib/librnglib.a \\" >> $config_host_mak
   echo "    $libspdm_build_dir/lib/libmemlib.a \\" >> $config_host_mak
   echo "    $libspdm_build_dir/lib/libmalloclib.a \\" >> $config_host_mak
-  echo "    $libspdm_build_dir/lib/libdebuglib.a \\" >> $config_host_mak
+  # echo "    $libspdm_build_dir/lib/libdebuglib.a \\" >> $config_host_mak
+  echo "    $libspdm_build_dir/lib/libdebuglib_null.a \\" >> $config_host_mak
+  echo "    $libspdm_build_dir/lib/libplatform_lib.a \\" >> $config_host_mak
   echo "    $libspdm_build_dir/lib/libcryptlib_""$libspdm_crypto"".a \\" >> $config_host_mak
-  echo "    $libspdm_build_dir/lib/lib""$libspdm_crypto""lib.a \\" >> $config_host_mak
+  echo "    $libspdm_build_dir/lib/lib""$libspdm_crypto"".a \\" >> $config_host_mak
+  echo "    $libspdm_build_dir/lib/libmbedcrypto.a \\" >> $config_host_mak
+  echo "    $libspdm_build_dir/lib/libmbedx509.a \\" >> $config_host_mak
   echo "    $libspdm_build_dir/lib/libspdm_crypt_lib.a \\" >> $config_host_mak
+  echo "    $libspdm_build_dir/lib/libspdm_crypt_ext_lib.a \\" >> $config_host_mak
   echo "    $libspdm_build_dir/lib/libspdm_secured_message_lib.a \\" >> $config_host_mak
   echo "    $libspdm_build_dir/lib/libspdm_responder_lib.a \\" >> $config_host_mak
-  echo "    $libspdm_build_dir/lib/libspdm_device_secret_lib_mod.a \\" >> $config_host_mak
+  echo "    $libspdm_build_dir/lib/libspdm_device_secret_lib_sample.a \\" >> $config_host_mak
   echo "    $libspdm_build_dir/lib/libspdm_common_lib.a \\" >> $config_host_mak
   echo "    $libspdm_build_dir/lib/libspdm_transport_mctp_lib.a \\" >> $config_host_mak
   echo "    $libspdm_build_dir/lib/libspdm_transport_pcidoe_lib.a \\" >> $config_host_mak

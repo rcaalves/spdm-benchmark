@@ -31,36 +31,35 @@
 #include "qemu/module.h"
 #include "qapi/visitor.h"
 
-// avoiding some annoying redefine warnings
-#ifdef ARRAY_SIZE
-#undef ARRAY_SIZE
-#undef FALSE
-#undef TRUE
-#endif
 
 // libspdm includes
-#pragma GCC diagnostic ignored "-Wundef"
 #include "spdm_common_lib.h"
 #include "spdm_responder_lib.h"
-#include "spdm_responder_lib_internal.h"
+// this define avoid some annoying warnings
+#define REQUESTER_PSKLIB_H
 #include "spdm_device_secret_lib_internal.h"
 #include <library/spdm_transport_mctp_lib.h>
 #include "pci_idekm.h"
 #include "pldm.h"
 #include "pcidoe.h"
 #include "mctp.h"
-#pragma GCC diagnostic pop
+#include "internal/libspdm_common_lib.h"
 
-#include "UioSpdmRng.h"
+#include "uio_spdm_rng.h"
 #include "spdm_emu_rng.c"
 
+// perf
+// #include <sys/ioctl.h> // this include may cause compilation issues
+int ioctl(int fd, unsigned long request, ...);
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
 #include <asm/unistd.h>
-#include <unistd.h>
+// #include <unistd.h>
+
+#define SPDMDEV_DEBUG 0
 
 #define TYPE_PCI_SPDM_DEVICE "spdm"
-#define SPDM(obj)        OBJECT_CHECK(SpdmState, obj, TYPE_PCI_SPDM_DEVICE)
+#define SPDM(obj)        OBJECT_CHECK(spdmdev_state, obj, TYPE_PCI_SPDM_DEVICE)
 
 #define FACT_IRQ        0x00000001
 #define DMA_IRQ         0x00000100
@@ -81,7 +80,7 @@
 #define SPDMDEV_MAX_BUF             (4096)
 
 // external variable that controls tampering simulation
-extern uint8 ts[10];
+extern uint8_t ts[10];
 
 typedef struct {
     PCIDevice pdev;
@@ -95,6 +94,7 @@ typedef struct {
 
     // Used by SPDM messaging
     QemuThread spdm_io_thread;
+    // QemuMutex spdm_io_mutex;
     QemuCond spdm_io_cond;
     bool spdm_io_stopping;
 
@@ -120,12 +120,15 @@ typedef struct {
     QEMUTimer dma_timer;
     char dma_buf[DMA_SIZE];
     uint64_t dma_mask;
-    void* oSpdmContext;
+    void* dev_spdm_context;
+    // char spdm_buf[SPDMDEV_MAX_BUF];
+    // uint32_t spdm_ctrl;
+    // uint32_t spdm_buf_size;
     int fd_cycles;
     int fd_taskclock;
     int fd_instructions;
     FILE* out_f;
-} SpdmState;
+} spdmdev_state;
 
 #define NUM_PERF_EVENTS 3
 enum { CYCLES = 0, TASK_CLOCK = 1, INSTRUCTIONS = 2 };
@@ -145,67 +148,54 @@ uint8_t spdm_buf[SPDMDEV_MAX_BUF];
 uint32_t spdm_ctrl;
 uint32_t spdm_buf_size;
 QemuMutex spdm_io_mutex;
+QemuMutex spdm_ctx_mutex;
 
 // Prototypes
-return_status
-SpdmDevSendMessage (
-  IN     void                    *SpdmContext,
-  IN     uintn                   RequestSize,
-  IN     void                    *Request,
-  IN     uint64                  Timeout
+libspdm_return_t
+spdmdev_send_message (
+  void                    *spdm_context,
+  size_t                   request_size,
+  const void              *request,
+  uint64_t                 timeout
   );
 
-return_status
-SpdmDevReceiveMessage (
-  IN     void                    *SpdmContext,
-  IN OUT uintn                   *ResponseSize,
-  IN OUT void                    *Response,
-  IN     uint64                  Timeout
+libspdm_return_t
+spdmdev_receive_message (
+  void                   *spdm_context,
+  size_t                 *response_size,
+  void                  **response,
+  uint64_t                timeout
   );
 
-return_status
-SpdmGetResponseVendorDefinedRequest (
-  IN     void                *SpdmContext,
-  IN     uint32               *SessionId,
-  IN     boolean              IsAppMessage,
-  IN     uintn                RequestSize,
-  IN     void                 *Request,
-  IN OUT uintn                *ResponseSize,
-     OUT void                 *Response
+libspdm_return_t
+spdmdev_get_response_vendor_defined_request (
+  void                    *spdm_context,
+  const uint32_t          *session_id,
+  bool                     is_app_message,
+  size_t                   request_size,
+  const void              *request,
+  size_t                  *response_size,
+  void                    *response
   );
 
-return_status
-QemuSpdmGetResponseVendorDefinedRequest (
-  IN     void                *SpdmContext,
-  IN     uint32               *SessionId,
-  IN     boolean              IsAppMessage,
-  IN     uintn                RequestSize,
-  IN     void                 *Request,
-  IN OUT uintn                *ResponseSize,
-     OUT void                 *Response
+libspdm_return_t
+spdmdev_process_packet_callback (
+  const uint32_t           *session_id,
+  bool                      is_app_message,
+  const void               *request,
+  size_t                    request_size,
+  void                     *response,
+  size_t                   *response_size
   );
 
-return_status
-QemuTestSpdmProcessPacketCallback (
-  IN     uint32                       *SessionId,
-  IN     boolean                      IsAppMessage,
-  IN     void                         *Request,
-  IN     uintn                        RequestSize,
-     OUT void                         *Response,
-  IN OUT uintn                        *ResponseSize
-  );
+void spdmdev_server_callback (void *spdm_context);
 
-void
-QemuSpdmServerCallback (
-  IN void                         *SpdmContext
-  );
+libspdm_return_t spdmdev_init_perf_events(int *fd_cycles, int *fd_taskclock, int *fd_instructions);
 
-return_status spdmdev_init_perf_events(int *fd_cycles, int *fd_taskclock, int *fd_instructions);
-
-uint32 myGetRand(void);
+uint32_t spdmdev_get_rand(void);
 
 unsigned int mySeed = 12345;
-uint32 myGetRand(void) {
+uint32_t spdmdev_get_rand(void) {
     return rand_r(&mySeed);
 }
 
@@ -221,7 +211,7 @@ spdm_vendor_defined_response_mine_t  mVendorDefinedResponse = {
   SPDM_VENDOR_ID_PCISIG, // VendorID
   sizeof(pci_protocol_header_t) + sizeof(pci_ide_km_query_resp_t), // PayloadLength
   {
-    PCI_PROTOCAL_ID_IDE_KM,
+    PCI_PROTOCOL_ID_IDE_KM,
   },
   {
     {
@@ -251,15 +241,15 @@ secure_session_response_mine_t  mSecureSessionResponse = {
   1, // TID
 };
 
-SECURE_SESSION_RESPONSE_RNG mSecureRngResponse = {
+rng_secure_session_response_t mSecureRngResponse = {
   {
     MCTP_MESSAGE_TYPE_VENDOR_DEFINED_PCI
   },
 };
 
-const char* spdmdev_requestreponsecode_to_str(uint8 code);
+const char* spdmdev_requestreponsecode_to_str(uint8_t code);
 
-const char* spdmdev_requestreponsecode_to_str(uint8 code) {
+const char* spdmdev_requestreponsecode_to_str(uint8_t code) {
   // printf("%02X\n", code);
   switch (code) {
     case SPDM_DIGESTS: return "SPDM_DIGESTS";
@@ -281,24 +271,24 @@ const char* spdmdev_requestreponsecode_to_str(uint8 code) {
     case SPDM_ENCAPSULATED_RESPONSE_ACK: return "SPDM_ENCAPSULATED_RESPONSE_ACK";
     case SPDM_END_SESSION_ACK: return "SPDM_END_SESSION_ACK";
 
-    case SPDM_GET_DIGESTS: return "get_digest";
-    case SPDM_GET_CERTIFICATE: return "get_certificate";
-    case SPDM_CHALLENGE: return "challenge";
-    case SPDM_GET_VERSION: return "get_version";
-    case SPDM_GET_MEASUREMENTS: return "get_measurement";
-    case SPDM_GET_CAPABILITIES: return "get_capabilities";
-    case SPDM_NEGOTIATE_ALGORITHMS: return "negotiate_algorithms";
-    case SPDM_VENDOR_DEFINED_REQUEST: return "get_random_spdm";
+    case SPDM_GET_DIGESTS: return "get_digest"; //"SPDM_GET_DIGESTS";
+    case SPDM_GET_CERTIFICATE: return "get_certificate"; //"SPDM_GET_CERTIFICATE";
+    case SPDM_CHALLENGE: return "challenge"; //"SPDM_CHALLENGE";
+    case SPDM_GET_VERSION: return "get_version"; //"SPDM_GET_VERSION";
+    case SPDM_GET_MEASUREMENTS: return "get_measurement"; //"SPDM_GET_MEASUREMENTS";
+    case SPDM_GET_CAPABILITIES: return "get_capabilities"; //"SPDM_GET_CAPABILITIES";
+    case SPDM_NEGOTIATE_ALGORITHMS: return "negotiate_algorithms"; //"SPDM_NEGOTIATE_ALGORITHMS";
+    case SPDM_VENDOR_DEFINED_REQUEST: return "get_random_spdm";//return "SPDM_VENDOR_DEFINED_REQUEST";
     case SPDM_RESPOND_IF_READY: return "SPDM_RESPOND_IF_READY";
-    case SPDM_KEY_EXCHANGE: return "key_exchange";
-    case SPDM_FINISH: return "finish";
-    case SPDM_PSK_EXCHANGE: return "key_exchangePSK";
-    case SPDM_PSK_FINISH: return "finishPSK";
-    case SPDM_HEARTBEAT: return "heartbeat";
-    case SPDM_KEY_UPDATE: return "key_update";
+    case SPDM_KEY_EXCHANGE: return "key_exchange"; //"SPDM_KEY_EXCHANGE";
+    case SPDM_FINISH: return "finish"; //"SPDM_FINISH";
+    case SPDM_PSK_EXCHANGE: return "key_exchangePSK"; //"SPDM_PSK_EXCHANGE";
+    case SPDM_PSK_FINISH: return "finishPSK"; //"SPDM_PSK_FINISH";
+    case SPDM_HEARTBEAT: return "heartbeat"; //"SPDM_HEARTBEAT";
+    case SPDM_KEY_UPDATE: return "key_update"; //"SPDM_KEY_UPDATE";
     case SPDM_GET_ENCAPSULATED_REQUEST: return "SPDM_GET_ENCAPSULATED_REQUEST";
-    case SPDM_DELIVER_ENCAPSULATED_RESPONSE: return "SPDM_DELIVER_ENCAPSULATED_RESPONSE";
-    case SPDM_END_SESSION: return "end_session";
+    case SPDM_DELIVER_ENCAPSULATED_RESPONSE: return "SPDM_DELIVER_ENCAPSULATED_RESPONSE"; //return "MUTUAL_AUTH";
+    case SPDM_END_SESSION: return "end_session"; //"SPDM_END_SESSION";
     default: return "Unknown code";
   }
   return NULL;
@@ -312,15 +302,15 @@ int spdmdev_init_spdm(void **spdm_context);
 
   @param  This                         Indicates a pointer to the calling context.
   @param  SessionId                    ID of the session.
-  @param  Request                      A pointer to the request data.
-  @param  RequestSize                  Size of the request data.
-  @param  Response                     A pointer to the response data.
-  @param  ResponseSize                 Size of the response data. On input, it means the size of Data
+  @param  request                      A pointer to the request data.
+  @param  request_size                 Size of the request data.
+  @param  response                     A pointer to the response data.
+  @param  response_size                Size of the response data. On input, it means the size of Data
                                        buffer. On output, it means the size of copied Data buffer if
-                                       RETURN_SUCCESS, and means the size of desired Data buffer if
+                                       LIBSPDM_STATUS_SUCCESS, and means the size of desired Data buffer if
                                        RETURN_BUFFER_TOO_SMALL.
 
-  @retval RETURN_SUCCESS                  The SPDM request is set successfully.
+  @retval LIBSPDM_STATUS_SUCCESS          The SPDM request is set successfully.
   @retval RETURN_INVALID_PARAMETER        The DataSize is NULL or the Data is NULL and *DataSize is not zero.
   @retval RETURN_UNSUPPORTED              The DataType is unsupported.
   @retval RETURN_NOT_FOUND                The DataType cannot be found.
@@ -330,228 +320,252 @@ int spdmdev_init_spdm(void **spdm_context);
                                           to execute.
 **/
 
-return_status
-QemuTestSpdmProcessPacketCallback (
-  IN     uint32                       *SessionId,
-  IN     boolean                      IsAppMessage,
-  IN     void                         *Request,
-  IN     uintn                        RequestSize,
-     OUT void                         *Response,
-  IN OUT uintn                        *ResponseSize
+libspdm_return_t
+spdmdev_process_packet_callback (
+  const uint32_t           *session_id,
+  bool                      is_app_message,
+  const void               *request,
+  size_t                    request_size,
+  void                     *response,
+  size_t                   *response_size
   )
 {
-#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
-  spdm_vendor_defined_request_mine_t   *SpmdRequest;
-#pragma GCC diagnostic pop
-  secure_session_request_mine_t        *AppRequest;
-  SECURE_SESSION_REQUEST_RNG         *AppRequestRng;
+  const spdm_vendor_defined_request_mine_t  *spdm_request;
+  const secure_session_request_mine_t       *app_request;
+  const rng_secure_session_request_t        *app_request_rng;
 
-  if (!IsAppMessage) {
-    SpmdRequest = Request;
-    ASSERT ((RequestSize >= sizeof(spdm_vendor_defined_request_mine_t)) && (RequestSize < sizeof(spdm_vendor_defined_request_mine_t) + 4));
-    ASSERT (SpmdRequest->header.request_response_code == SPDM_VENDOR_DEFINED_REQUEST);
-    ASSERT (SpmdRequest->standard_id == SPDM_REGISTRY_ID_PCISIG);
-    ASSERT (SpmdRequest->vendor_id == SPDM_VENDOR_ID_PCISIG);
-    ASSERT (SpmdRequest->payload_length == sizeof(pci_protocol_header_t) + sizeof(pci_ide_km_query_t));
-    ASSERT (SpmdRequest->pci_protocol.protocol_id == PCI_PROTOCAL_ID_IDE_KM);
-    ASSERT (SpmdRequest->pci_ide_km_query.header.object_id == PCI_IDE_KM_OBJECT_ID_QUERY);
-    copy_mem (Response, &mVendorDefinedResponse, sizeof(mVendorDefinedResponse));
-    *ResponseSize = sizeof(mVendorDefinedResponse);
+  if (!is_app_message) {
+    spdm_request = request;
+    LIBSPDM_ASSERT ((request_size >= sizeof(spdm_vendor_defined_request_mine_t)) && (request_size < sizeof(spdm_vendor_defined_request_mine_t) + 4));
+    LIBSPDM_ASSERT (spdm_request->header.request_response_code == SPDM_VENDOR_DEFINED_REQUEST);
+    LIBSPDM_ASSERT (spdm_request->standard_id == SPDM_REGISTRY_ID_PCISIG);
+    LIBSPDM_ASSERT (spdm_request->vendor_id == SPDM_VENDOR_ID_PCISIG);
+    LIBSPDM_ASSERT (spdm_request->payload_length == sizeof(pci_protocol_header_t) + sizeof(pci_ide_km_query_t));
+    LIBSPDM_ASSERT (spdm_request->pci_protocol.protocol_id == PCI_PROTOCOL_ID_IDE_KM);
+    LIBSPDM_ASSERT (spdm_request->pci_ide_km_query.header.object_id == PCI_IDE_KM_OBJECT_ID_QUERY);
+    memcpy (response, &mVendorDefinedResponse, sizeof(mVendorDefinedResponse));
+    *response_size = sizeof(mVendorDefinedResponse);
   } else {
-    AppRequest = Request;
-    AppRequestRng = Request;
-    // printf("AppRequest->mctp_header.message_type %X \n", AppRequest->mctp_header.message_type);
-    if (AppRequest->mctp_header.message_type == MCTP_MESSAGE_TYPE_PLDM) {
-      ASSERT (RequestSize == sizeof(secure_session_request_mine_t));
-      ASSERT (AppRequest->mctp_header.message_type == MCTP_MESSAGE_TYPE_PLDM);
-      ASSERT (AppRequest->pldm_header.pldm_type == PLDM_MESSAGE_TYPE_CONTROL_DISCOVERY);
-      ASSERT (AppRequest->pldm_header.pldm_command_code == PLDM_CONTROL_DISCOVERY_COMMAND_GET_TID);
+    app_request = request;
+    app_request_rng = request;
+    // printf("app_request->mctp_header.message_type %X \n", app_request->mctp_header.message_type);
+    if (app_request->mctp_header.message_type == MCTP_MESSAGE_TYPE_PLDM) {
+      LIBSPDM_ASSERT (request_size == sizeof(secure_session_request_mine_t));
+      LIBSPDM_ASSERT (app_request->mctp_header.message_type == MCTP_MESSAGE_TYPE_PLDM);
+      LIBSPDM_ASSERT (app_request->pldm_header.pldm_type == PLDM_MESSAGE_TYPE_CONTROL_DISCOVERY);
+      LIBSPDM_ASSERT (app_request->pldm_header.pldm_command_code == PLDM_CONTROL_DISCOVERY_COMMAND_GET_TID);
 
-      copy_mem (Response, &mSecureSessionResponse, sizeof(mSecureSessionResponse));
-      *ResponseSize = sizeof(mSecureSessionResponse);
-    } else if (AppRequestRng->MctpHeader.message_type == MCTP_MESSAGE_TYPE_VENDOR_DEFINED_PCI) {
-      ASSERT (AppRequestRng->Req == RNG_REQ_CODE);
-      mSecureRngResponse.Rng = myGetRand();
+      memcpy (response, &mSecureSessionResponse, sizeof(mSecureSessionResponse));
+      *response_size = sizeof(mSecureSessionResponse);
+    } else if (app_request_rng->MctpHeader.message_type == MCTP_MESSAGE_TYPE_VENDOR_DEFINED_PCI) {
+      LIBSPDM_ASSERT (app_request_rng->Req == RNG_REQ_CODE);
+      mSecureRngResponse.Rng = spdmdev_get_rand();
       // printf("Sending random number %d\n", mSecureRngResponse.Rng);
-      copy_mem (Response, &mSecureRngResponse, sizeof(mSecureRngResponse));
-      *ResponseSize = sizeof(mSecureRngResponse);
+      memcpy (response, &mSecureRngResponse, sizeof(mSecureRngResponse));
+      *response_size = sizeof(mSecureRngResponse);
     } else {
-        return RETURN_DEVICE_ERROR;
+        return LIBSPDM_STATUS_INVALID_PARAMETER;
     }
   }
 
-  return RETURN_SUCCESS;
+  return LIBSPDM_STATUS_SUCCESS;
 }
 
-return_status
-QemuSpdmGetResponseVendorDefinedRequest (
-  IN     void                *SpdmContext,
-  IN     uint32               *SessionId,
-  IN     boolean              IsAppMessage,
-  IN     uintn                RequestSize,
-  IN     void                 *Request,
-  IN OUT uintn                *ResponseSize,
-     OUT void                 *Response
+libspdm_return_t
+spdmdev_get_response_vendor_defined_request (
+  void                 *spdm_context,
+  const uint32_t       *session_id,
+  bool                  is_app_message,
+  size_t                request_size,
+  const void           *request,
+  size_t               *response_size,
+  void                 *response
   )
 {
-  return_status  Status;
+  libspdm_return_t status;
 
-  Status = QemuTestSpdmProcessPacketCallback (
-             SessionId,
-             IsAppMessage,
-             Request,
-             RequestSize,
-             Response,
-             ResponseSize
+  status = spdmdev_process_packet_callback (
+             session_id,
+             is_app_message,
+             request,
+             request_size,
+             response,
+             response_size
              );
-  if (RETURN_ERROR(Status)) {
-    spdm_generate_error_response (SpdmContext, SPDM_ERROR_CODE_INVALID_REQUEST, 0, ResponseSize, Response);
+  if (LIBSPDM_STATUS_IS_ERROR(status)) {
+    libspdm_generate_error_response (spdm_context, SPDM_ERROR_CODE_INVALID_REQUEST, 0, response_size, response);
   }
-  return RETURN_SUCCESS;
+  return LIBSPDM_STATUS_SUCCESS;
 }
 
 
-void
-QemuSpdmServerCallback (
-  IN void                         *SpdmContext
-  )
-{
-  boolean                      Res;
-  void                         *Data;
-  uintn                        DataSize;
-  spdm_data_parameter_t        Parameter;
-  uint8                        Data8;
-  uint16                       Data16;
-  uint32                       Data32;
-  return_status                Status;
-  void                         *Hash;
-  uintn                        HashSize;
-  uint8                        Index;
+void spdmdev_server_callback (void *spdm_context) {
+  bool                        res;
+  void                       *data;
+  size_t                      data_size;
+  libspdm_data_parameter_t    parameter;
+  uint8_t                     data8;
+  uint16_t                    data16;
+  uint32_t                    data32;
+  void                       *hash;
+  size_t                      hash_size;
+  uint8_t                     index;
+  // libspdm_return_t         status;
 
-  zero_mem (&Parameter, sizeof(Parameter));
-  Parameter.location = SPDM_DATA_LOCATION_CONNECTION;
+  // static bool                 AlgoProvisioned = false;
+  // if (AlgoProvisioned) {
+  //   return ;
+  // }
 
-  DataSize = sizeof(Data32);
-  spdm_get_data (SpdmContext, SPDM_DATA_CONNECTION_STATE, &Parameter, &Data32, &DataSize);
-  if (Data32 != SPDM_CONNECTION_STATE_NEGOTIATED) {
+  libspdm_zero_mem (&parameter, sizeof(parameter));
+  parameter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+
+  data_size = sizeof(data32);
+  libspdm_get_data (spdm_context, LIBSPDM_DATA_CONNECTION_STATE, &parameter, &data32, &data_size);
+  if (data32 != LIBSPDM_CONNECTION_STATE_NEGOTIATED) {
     return ;
   }
 
-  DataSize = sizeof(Data32);
-  spdm_get_data (SpdmContext, SPDM_DATA_MEASUREMENT_HASH_ALGO, &Parameter, &Data32, &DataSize);
-  m_use_measurement_hash_algo = Data32;
-  DataSize = sizeof(Data32);
-  spdm_get_data (SpdmContext, SPDM_DATA_BASE_ASYM_ALGO, &Parameter, &Data32, &DataSize);
-  m_use_asym_algo = Data32;
-  DataSize = sizeof(Data32);
-  spdm_get_data (SpdmContext, SPDM_DATA_BASE_HASH_ALGO, &Parameter, &Data32, &DataSize);
-  m_use_hash_algo = Data32;
-  DataSize = sizeof(Data16);
-  spdm_get_data (SpdmContext, SPDM_DATA_REQ_BASE_ASYM_ALG, &Parameter, &Data16, &DataSize);
-  m_use_req_asym_algo = Data16;
+  // data_size = sizeof(data32);
+  // libspdm_get_data (spdm_context, LIBSPDM_DATA_MEASUREMENT_HASH_ALGO, &parameter, &data32, &data_size);
+  // m_use_measurement_hash_algo = data32;
+  data_size = sizeof(data32);
+  libspdm_get_data (spdm_context, LIBSPDM_DATA_BASE_ASYM_ALGO, &parameter, &data32, &data_size);
+  m_use_asym_algo = data32;
+  data_size = sizeof(data32);
+  libspdm_get_data (spdm_context, LIBSPDM_DATA_BASE_HASH_ALGO, &parameter, &data32, &data_size);
+  m_use_hash_algo = data32;
+  data_size = sizeof(data16);
+  libspdm_get_data (spdm_context, LIBSPDM_DATA_REQ_BASE_ASYM_ALG, &parameter, &data16, &data_size);
+  m_use_req_asym_algo = data16;
 
-  Res = read_responder_public_certificate_chain (m_use_hash_algo, m_use_asym_algo, &Data, &DataSize, NULL, NULL);
-  if (Res) {
-    zero_mem (&Parameter, sizeof(Parameter));
-    Parameter.location = SPDM_DATA_LOCATION_LOCAL;
-    Data8 = m_use_slot_count;
-    spdm_set_data (SpdmContext, SPDM_DATA_LOCAL_SLOT_COUNT, &Parameter, &Data8, sizeof(Data8));
+  res = libspdm_read_responder_public_certificate_chain (m_use_hash_algo, m_use_asym_algo, &data, &data_size, NULL, NULL);
+  if (res) {
+    libspdm_zero_mem (&parameter, sizeof(parameter));
+    parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+    data8 = m_use_slot_count;
+    libspdm_set_data (spdm_context, LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN, &parameter, &data8, sizeof(data8));
 
-    for (Index = 0; Index < m_use_slot_count; Index++) {
-      Parameter.additional_data[0] = Index;
-      spdm_set_data (SpdmContext, SPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN, &Parameter, Data, DataSize);
+    for (index = 0; index < SPDM_MAX_SLOT_COUNT; index++) {
+      parameter.additional_data[0] = index;
+      libspdm_set_data (spdm_context, LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN, &parameter, data, data_size);
     }
+
+#if SPDMDEV_DEBUG
+    printf("%s spdm_context->local_context.local_cert_chain_provision[0] (%ld)", __func__, ((libspdm_context_t *)spdm_context)->local_context.local_cert_chain_provision_size[0]);
+    for (int i = 0; i < MIN(((libspdm_context_t *)spdm_context)->local_context.local_cert_chain_provision_size[0],64); i++) {
+            if (i%16 == 0) printf("\n[%3d] ", i);
+            printf("0x%02x ", ((const uint8_t*)((libspdm_context_t *)spdm_context)->local_context.local_cert_chain_provision[0])[i]);
+    }
+    printf("\n");
+#endif
     // do not free it
   }
 
   if (m_use_slot_id == 0xFF) {
-    Res = read_requester_public_certificate_chain (m_use_hash_algo, m_use_req_asym_algo, &Data, &DataSize, NULL, NULL);
-    if (Res) {
-      zero_mem (&Parameter, sizeof(Parameter));
-      Parameter.location = SPDM_DATA_LOCATION_LOCAL;
-      spdm_set_data (SpdmContext, SPDM_DATA_PEER_PUBLIC_CERT_CHAIN, &Parameter, Data, DataSize);
+    res = libspdm_read_requester_public_certificate_chain (m_use_hash_algo, m_use_req_asym_algo, &data, &data_size, NULL, NULL);
+    if (res) {
+      libspdm_zero_mem (&parameter, sizeof(parameter));
+      parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+      libspdm_set_data (spdm_context, LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN, &parameter, data, data_size);
       // Do not free it.
     }
   } else {
-    Res = read_requester_root_public_certificate (m_use_hash_algo, m_use_req_asym_algo, &Data, &DataSize, &Hash, &HashSize);
-    if (Res) {
-      zero_mem (&Parameter, sizeof(Parameter));
-      Parameter.location = SPDM_DATA_LOCATION_LOCAL;
-      spdm_set_data (SpdmContext, SPDM_DATA_PEER_PUBLIC_ROOT_CERT_HASH, &Parameter, Hash, HashSize);
+    res = libspdm_read_requester_root_public_certificate (m_use_hash_algo, m_use_req_asym_algo, &data, &data_size, &hash, &hash_size);
+    if (res) {
+      libspdm_zero_mem (&parameter, sizeof(parameter));
+      parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+      libspdm_set_data (spdm_context, LIBSPDM_DATA_PEER_PUBLIC_ROOT_CERT, &parameter, hash, hash_size);
       // Do not free it.
     }
   }
 
-  if (Res) {
-    Data8 = m_use_mut_auth;
-    if (Data8 != 0) {
-      Data8 |= SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED;
+  if (res) {
+    data8 = m_use_mut_auth;
+    if (data8 != 0) {
+      data8 |= SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED_WITH_ENCAP_REQUEST;
     }
-    Parameter.additional_data[0] = m_use_slot_id;
-    Parameter.additional_data[1] = m_use_measurement_summary_hash_type;
-    spdm_set_data (SpdmContext, SPDM_DATA_MUT_AUTH_REQUESTED, &Parameter, &Data8, sizeof(Data8));
+    parameter.additional_data[0] = m_use_slot_id;
+    parameter.additional_data[1] = m_use_measurement_summary_hash_type;
+    libspdm_set_data (spdm_context, LIBSPDM_DATA_MUT_AUTH_REQUESTED, &parameter, &data8, sizeof(data8));
 
-    Data8 = (m_use_mut_auth & 0x1);
-    spdm_set_data (SpdmContext, SPDM_DATA_BASIC_MUT_AUTH_REQUESTED, &Parameter, &Data8, sizeof(Data8));
+    data8 = (m_use_mut_auth & 0x1);
+    libspdm_set_data (spdm_context, LIBSPDM_DATA_BASIC_MUT_AUTH_REQUESTED, &parameter, &data8, sizeof(data8));
   }
 
-  Status = spdm_set_data (SpdmContext, SPDM_DATA_PSK_HINT, NULL, (void *) TEST_PSK_HINT_STRING, sizeof(TEST_PSK_HINT_STRING));
-  if (RETURN_ERROR(Status)) {
-    fprintf (stderr, "spdm_set_data error- %x\n", (uint32_t)Status);
-  }
+  libspdm_zero_mem(&parameter, sizeof(parameter));
+  parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+  data8 = 0xFF;
+  libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_SUPPORTED_SLOT_MASK, &parameter,
+                      &data8, sizeof(data8));
+
+  // AlgoProvisioned = true;
 
   return ;
 }
 
 // Functions to be used with SpdmRegisterDeviceIoFunc
-return_status
-SpdmDevSendMessage (
-  IN     void                    *SpdmContext,
-  IN     uintn                   RequestSize,
-  IN     void                    *Request,
-  IN     uint64                  Timeout
+libspdm_return_t
+spdmdev_send_message (
+  void                    *spdm_context,
+  size_t                   request_size,
+  const void              *request,
+  uint64_t                 timeout
   )
 {
-    if (RequestSize > sizeof(spdm_buf)) {
-        fprintf(stderr, "RequestSize too large %llu\n", RequestSize);
-        return RETURN_DEVICE_ERROR;
+    if (request_size > sizeof(spdm_buf)) {
+        fprintf(stderr, "request_size too large %lu\n", request_size);
+        return LIBSPDM_STATUS_INVALID_PARAMETER;
     }
 
     if (! (atomic_read(&spdm_ctrl) & SPDMDEV_TX_TO_DEV_DONE)) {
         fprintf(stderr, "Wrong spdm_ctrl flags 0x%X\n", atomic_read(&spdm_ctrl));
-        return RETURN_DEVICE_ERROR;
+        return LIBSPDM_STATUS_INVALID_PARAMETER;
     }
 
+    // spdm_ctrl |= SPDMDEV_TX_TO_OS;
     atomic_or(&spdm_ctrl, SPDMDEV_TX_TO_OS);
-    atomic_set(&spdm_buf_size, RequestSize);
+    atomic_set(&spdm_buf_size, request_size);
     qemu_mutex_lock(&spdm_io_mutex);
-    memcpy(spdm_buf, Request, RequestSize);
+    // DUMP_ARRAY("", request, request_size);
+    memcpy(spdm_buf, request, request_size);
     qemu_mutex_unlock(&spdm_io_mutex);
     atomic_or(&spdm_ctrl, SPDMDEV_TX_TO_OS_DONE);
 
-    return RETURN_SUCCESS;
+    // raise interrupt
+    // pci_set_irq(&spdmst->pdev, 1); // Can't do it here as this function cannot access "spdmst"
+    return LIBSPDM_STATUS_SUCCESS;
 }
 
-return_status
-SpdmDevReceiveMessage (
-  IN     void                    *SpdmContext,
-  IN OUT uintn                   *ResponseSize,
-  IN OUT void                    *Response,
-  IN     uint64                  Timeout
+libspdm_return_t
+spdmdev_receive_message (
+  void                     *spdm_context,
+  size_t                   *response_size,
+  void                    **response,
+  uint64_t                  timeout
   )
 {
-    // printf("SpdmDevReceiveMessage\n");
-    if (*ResponseSize < atomic_read(&spdm_buf_size)) {
-        fprintf(stderr, "*ResponseSize too small %llu\n", *ResponseSize);
-        return RETURN_DEVICE_ERROR;
-    }
-    // printf("SpdmDevReceiveMessage memcpy\n");
-    qemu_mutex_lock(&spdm_io_mutex);
-    memcpy(Response, spdm_buf, spdm_buf_size);
-    qemu_mutex_unlock(&spdm_io_mutex);
-    *ResponseSize = atomic_read(&spdm_buf_size);
 
-    return RETURN_SUCCESS;
+    // const uint8_t GET_VERSION[] = {0x05, 0x10, 0x84, 0x00, 0x00};
+    // printf("spdmdev_receive_message\n");
+    if (*response_size < atomic_read(&spdm_buf_size)) {
+        fprintf(stderr, "*response_size too small %lu\n", *response_size);
+        return LIBSPDM_STATUS_INVALID_PARAMETER;
+    }
+    // for (int i = 0; i < MIN(spdm_buf_size, 8); i++)
+    //   printf("%x ", spdm_buf[i]);
+    // printf("\n");
+    // fflush(stdout);
+    // if (!memcmp(GET_VERSION, spdm_buf, sizeof(GET_VERSION))) {
+    //     libspdm_reset_context(spdm_context);
+    // }
+    qemu_mutex_lock(&spdm_io_mutex);
+    // printf("spdmdev_receive_message memcpy\n");
+    memcpy(*response, spdm_buf, spdm_buf_size);
+    qemu_mutex_unlock(&spdm_io_mutex);
+    *response_size = atomic_read(&spdm_buf_size);
+
+    return LIBSPDM_STATUS_SUCCESS;
 }
 
 static long
@@ -565,7 +579,7 @@ spdmdev_perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
     return ret;
 }
 
-return_status spdmdev_init_perf_events(int *fd_cycles, int *fd_taskclock, int *fd_instructions) { //SpdmState *spdmst) {
+libspdm_return_t spdmdev_init_perf_events(int *fd_cycles, int *fd_taskclock, int *fd_instructions) {
   struct perf_event_attr pe;
 
   memset(&pe, 0, sizeof(struct perf_event_attr));
@@ -580,13 +594,13 @@ return_status spdmdev_init_perf_events(int *fd_cycles, int *fd_taskclock, int *f
                    // PERF_FORMAT_ID;
                    0;
 
-  pe.type = PERF_TYPE_HARDWARE;
+  pe.type   = PERF_TYPE_HARDWARE;
   pe.config = PERF_COUNT_HW_CPU_CYCLES;
 
   *fd_cycles = spdmdev_perf_event_open(&pe, 0, -1, -1, 0);
   if (*fd_cycles == -1) {
       fprintf(stderr, "Error opening perf leader fd %llx\n", pe.config);
-      return RETURN_DEVICE_ERROR;
+      return LIBSPDM_STATUS_INVALID_PARAMETER;
   }
 
   pe.type = PERF_TYPE_SOFTWARE;
@@ -595,7 +609,7 @@ return_status spdmdev_init_perf_events(int *fd_cycles, int *fd_taskclock, int *f
   *fd_taskclock = spdmdev_perf_event_open(&pe, 0, -1, *fd_cycles, 0);
   if (*fd_taskclock == -1) {
       fprintf(stderr, "Error opening perf TASK_CLOCK fd %llx\n", pe.config);
-      return RETURN_DEVICE_ERROR;
+      return LIBSPDM_STATUS_INVALID_PARAMETER;
   }
 
   pe.type = PERF_TYPE_HARDWARE;
@@ -604,19 +618,19 @@ return_status spdmdev_init_perf_events(int *fd_cycles, int *fd_taskclock, int *f
   *fd_instructions = spdmdev_perf_event_open(&pe, 0, -1, *fd_cycles, 0);
   if (*fd_instructions == -1) {
       fprintf(stderr, "Error opening perf INSTRUCTIONS fd %llx\n", pe.config);
-      return RETURN_DEVICE_ERROR;
+      return LIBSPDM_STATUS_INVALID_PARAMETER;
   }
 
-  return RETURN_SUCCESS;
+  return LIBSPDM_STATUS_SUCCESS;
 }
 
-// Device management functions
-static bool spdmdev_msi_enabled(SpdmState *spdmst)
+// Deice management functions
+static bool spdmdev_msi_enabled(spdmdev_state *spdmst)
 {
     return msi_enabled(&spdmst->pdev);
 }
 
-static void spdmdev_raise_irq(SpdmState *spdmst, uint32_t val)
+static void spdmdev_raise_irq(spdmdev_state *spdmst, uint32_t val)
 {
     spdmst->irq_status |= val;
     if (spdmst->irq_status) {
@@ -628,7 +642,7 @@ static void spdmdev_raise_irq(SpdmState *spdmst, uint32_t val)
     }
 }
 
-static void spdmdev_lower_irq(SpdmState *spdmst, uint32_t val)
+static void spdmdev_lower_irq(spdmdev_state *spdmst, uint32_t val)
 {
     spdmst->irq_status &= ~val;
 
@@ -658,7 +672,7 @@ static void spdmdev_check_range(uint64_t addr, uint64_t size1, uint64_t start,
             addr, end1 - 1, start, end2 - 1);
 }
 
-static dma_addr_t spdmdev_clamp_addr(const SpdmState *spdmst, dma_addr_t addr)
+static dma_addr_t spdmdev_clamp_addr(const spdmdev_state *spdmst, dma_addr_t addr)
 {
     dma_addr_t res = addr & spdmst->dma_mask;
 
@@ -671,7 +685,7 @@ static dma_addr_t spdmdev_clamp_addr(const SpdmState *spdmst, dma_addr_t addr)
 
 static void spdmdev_dma_timer(void *opaque)
 {
-    SpdmState *spdmst = opaque;
+    spdmdev_state *spdmst = opaque;
     bool raise_irq = false;
 
     if (!(spdmst->dma.cmd & SPDM_DMA_RUN)) {
@@ -702,7 +716,7 @@ static void spdmdev_dma_timer(void *opaque)
     }
 }
 
-static void dma_rw(SpdmState *spdmst, bool write, dma_addr_t *val, dma_addr_t *dma,
+static void dma_rw(spdmdev_state *spdmst, bool write, dma_addr_t *val, dma_addr_t *dma,
                 bool timer)
 {
     if (write && (spdmst->dma.cmd & SPDM_DMA_RUN)) {
@@ -722,7 +736,7 @@ static void dma_rw(SpdmState *spdmst, bool write, dma_addr_t *val, dma_addr_t *d
 
 static uint64_t spdmdev_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
-    SpdmState *spdmst = opaque;
+    spdmdev_state *spdmst = opaque;
     uint64_t val = ~0ULL;
 
     // printf("Trying to read %u bytes at 0x%X\n", size, addr);
@@ -789,7 +803,7 @@ static uint64_t spdmdev_mmio_read(void *opaque, hwaddr addr, unsigned size)
 static void spdmdev_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                 unsigned size)
 {
-    SpdmState *spdmst = opaque;
+    spdmdev_state *spdmst = opaque;
 
     // printf("Trying to write %u bytes (%lX) at 0x%lX\n", size, val, addr);
 
@@ -857,13 +871,19 @@ static void spdmdev_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         dma_rw(spdmst, true, &val, &spdmst->dma.cmd, true);
         break;
     case SPDMDEV_TXRX_CTRL_ADDR:
+        // spdm_ctrl = val;
         atomic_set(&spdm_ctrl, val);
+        // printf("0x%lx 0x%lx\n", val, val & SPDMDEV_TX_TO_DEV);
         if (val & SPDMDEV_TX_TO_DEV_DONE && ! (val & SPDMDEV_TX_TO_OS)) {
 
             qemu_mutex_lock(&spdm_io_mutex);
             qemu_cond_signal(&spdmst->spdm_io_cond);
             qemu_mutex_unlock(&spdm_io_mutex);
 
+            // if (spdm_ctrl & SPDMDEV_TX_TO_OS_DONE) {
+            //     // raise interrupt
+            //     pci_set_irq(&spdmst->pdev, 1);
+            // }
         }
         if (val == 0) {
             // printf("Lower IRQ SPDMIO_IRQ\n");
@@ -896,10 +916,8 @@ static const MemoryRegionOps spdmdev_mmio_ops = {
 
 };
 
-
-static void *spdmdev_fact_thread(void *opaque)
-{
-    SpdmState *spdmst = opaque;
+static void *spdmdev_fact_thread(void *opaque) {
+    spdmdev_state *spdmst = opaque;
 
     int local_cyc, local_clock, local_inst;
     struct read_format rf;
@@ -931,7 +949,7 @@ static void *spdmdev_fact_thread(void *opaque)
         } else {
             ioctl(local_cyc, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
             ioctl(local_cyc, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
-            ret = myGetRand();
+            ret = spdmdev_get_rand();
             ioctl(local_cyc, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP);
             read(local_cyc, &rf, sizeof(rf));
             if (spdmst->out_f) {
@@ -940,6 +958,11 @@ static void *spdmdev_fact_thread(void *opaque)
               fflush(spdmst->out_f);
             }
         }
+
+        /*
+         * We should sleep for a random period here, so that students are
+         * forced to check the status properly.
+         */
 
         qemu_mutex_lock(&spdmst->thr_mutex);
         spdmst->fact = ret;
@@ -960,17 +983,17 @@ static void *spdmdev_fact_thread(void *opaque)
     return NULL;
 }
 
-int should_accumulate(uint8 current_code, uint8 current_param2);
+int should_accumulate(uint8_t current_code, uint8_t current_param2);
 
-int keep_accumulating(uint16 previous_code, uint8 current_code);
+int keep_accumulating(uint16_t previous_code, uint8_t current_code);
 
-const char* get_suffix(uint8 code, boolean usePsk, int accumulating);
+const char* get_suffix(uint8_t code, bool use_psk, int accumulating);
 
-return_status SpdmDevSpdmResponderDispatchMessage (
-  IN     SpdmState *spdmst
+libspdm_return_t spdmdev_spdm_responder_dispatch_message (
+  spdmdev_state *spdmst
   );
 
-int should_accumulate(uint8 current_code, uint8 current_param2) {
+int should_accumulate(uint8_t current_code, uint8_t current_param2) {
   // accumulates GET_MEASUREMENTS, unless requester is getting all measurements at once
   if (current_code == SPDM_GET_MEASUREMENTS && current_param2 != SPDM_GET_MEASUREMENTS_REQUEST_MEASUREMENT_OPERATION_ALL_MEASUREMENTS) {
     return 1;
@@ -988,7 +1011,7 @@ int should_accumulate(uint8 current_code, uint8 current_param2) {
   return 0;
 }
 
-int keep_accumulating(uint16 previous_code, uint8 current_code) {
+int keep_accumulating(uint16_t previous_code, uint8_t current_code) {
   if (previous_code == current_code) {
     return 1;
   }
@@ -999,7 +1022,7 @@ int keep_accumulating(uint16 previous_code, uint8 current_code) {
   return 0;
 }
 
-const char* get_suffix(uint8 code, boolean usePsk, int accumulating) {
+const char* get_suffix(uint8_t code, bool use_psk, int accumulating) {
   if (code == SPDM_GET_MEASUREMENTS) {
     if (accumulating) {
       return "_one_by_one";
@@ -1011,7 +1034,7 @@ const char* get_suffix(uint8 code, boolean usePsk, int accumulating) {
       code == SPDM_KEY_UPDATE ||
       code == SPDM_VENDOR_DEFINED_REQUEST ||
       code == SPDM_END_SESSION) {
-    if (usePsk) {
+    if (use_psk) {
       return "PSK";
     } else {
       return "NoPSK";
@@ -1020,25 +1043,38 @@ const char* get_suffix(uint8 code, boolean usePsk, int accumulating) {
   return "";
 }
 
-return_status
-SpdmDevSpdmResponderDispatchMessage (
-  IN     SpdmState *spdmst
+static void spdm_clearall_session_id(libspdm_context_t *spdm_context)
+{
+    libspdm_session_info_t *session_info;
+    size_t index;
+
+    session_info = spdm_context->session_info;
+    for (index = 0; index < LIBSPDM_MAX_SESSION_COUNT; index++) {
+        session_info[index].session_id = (INVALID_SESSION_ID & 0xFFFF);
+    }
+}
+
+libspdm_return_t
+spdmdev_spdm_responder_dispatch_message (
+  spdmdev_state *spdmst
   )
 {
-  return_status             Status;
-  spdm_context_t           *SpdmContext;
-  uint8                     Request[MAX_SPDM_MESSAGE_BUFFER_SIZE];
-  uintn                     RequestSize;
-  uint8                     Response[MAX_SPDM_MESSAGE_BUFFER_SIZE];
-  uintn                     ResponseSize;
-  uint32                    *SessionId;
-  boolean                   IsAppMessage;
+  libspdm_return_t          status;
+  libspdm_context_t        *spdm_context;
+  void                     *request;
+  size_t                    request_size;
+  void                     *response;
+  size_t                    response_size;
+  uint32_t                 *session_id;
+  bool                      is_app_message;
+  void                     *message;
+  size_t                    message_size;
 
-  spdm_session_info_t       *SessionInfo = NULL;
-  boolean                   usePsk = FALSE;
+  libspdm_session_info_t   *session_info = NULL;
+  bool                      use_psk = false;
 
   struct read_format        rf;
-  uint8                     RequestResponseCode;
+  uint8_t                   request_response_code;
 
   // static variables to maintain accumation state
   static uint64_t cycle_accum = 0;
@@ -1048,74 +1084,114 @@ SpdmDevSpdmResponderDispatchMessage (
   static int count_getversion = 0;
   static int accumulating = 0;
 
-  SpdmContext = spdmst->oSpdmContext;
+  // request = malloc(SPDMDEV_MAX_BUF);
+  // response = malloc(SPDMDEV_MAX_BUF);
+  // if (request == NULL || response == NULL) {
+  //   return LIBSPDM_STATUS_BUFFER_FULL;
+  // }
+
+  spdm_context = spdmst->dev_spdm_context;
+
+#if SPDMDEV_DEBUG
+  printf("%s spdm_context->local_context.local_cert_chain_provision[0] (%ld)", __func__, ((libspdm_context_t *)spdm_context)->local_context.local_cert_chain_provision_size[0]);
+  for (int i = 0; i < MIN(((libspdm_context_t *)spdm_context)->local_context.local_cert_chain_provision_size[0],64); i++) {
+          if (i%16 == 0) printf("\n[%3d] ", i);
+          printf("0x%02x ", ((const uint8_t*)((libspdm_context_t *)spdm_context)->local_context.local_cert_chain_provision[0])[i]);
+  }
+  printf("\n");
+#endif
 
   ioctl(spdmst->fd_cycles, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
   ioctl(spdmst->fd_cycles, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
 
-  RequestSize = sizeof(Request);
-  Status = SpdmContext->receive_message (SpdmContext, &RequestSize, Request, 0);
-  if (RETURN_ERROR(Status)) {
-    return Status;
+  status = libspdm_acquire_receiver_buffer (spdm_context, &message_size, (void **)&message);
+  if (LIBSPDM_STATUS_IS_ERROR(status)) {
+      return status;
+  }
+  request = message;
+  request_size = message_size;
+  #if LIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP
+  /* need get real receiver buffer, because acquire receiver buffer will return scratch buffer*/
+  libspdm_get_receiver_buffer (spdm_context, (void **)&request, &request_size);
+  #endif /* LIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP */
+
+  status = spdm_context->receive_message (spdm_context, &request_size, &request, 0);
+  if (LIBSPDM_STATUS_IS_ERROR(status)) {
+    libspdm_release_receiver_buffer (spdm_context);
+    return status;
   }
 
-  ResponseSize = sizeof(Response);
-  // Status = SpdmProcessMessage (SpdmContext, &SessionId, Request, RequestSize, Response, &ResponseSize);
-  Status = spdm_process_request (SpdmContext, &SessionId, &IsAppMessage, RequestSize, Request);
-  if (RETURN_ERROR(Status)) {
-    return Status;
+  // response_size = SPDMDEV_MAX_BUF;
+  status = libspdm_process_request (spdm_context, &session_id, &is_app_message, request_size, request);
+  if (LIBSPDM_STATUS_IS_ERROR(status)) {
+    libspdm_release_receiver_buffer (spdm_context);
+    return status;
   }
 
   ioctl(spdmst->fd_cycles, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP);
-  if (SessionId != NULL) {
-    SessionInfo = spdm_get_session_info_via_session_id (SpdmContext, *SessionId);
-    if (SessionInfo) usePsk = SessionInfo->use_psk;
+  if (session_id != NULL) {
+    session_info = libspdm_get_session_info_via_session_id (spdm_context, *session_id);
+    if (session_info) use_psk = session_info->use_psk;
   }
+  libspdm_release_receiver_buffer (spdm_context);
   ioctl(spdmst->fd_cycles, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
 
-  Status = spdm_build_response (SpdmContext, SessionId, IsAppMessage, &ResponseSize, Response);
-  if (RETURN_ERROR(Status)) {
-    return Status;
+  /* build and send response message */
+  status = libspdm_acquire_sender_buffer (spdm_context, &message_size, (void **)&message);
+  if (LIBSPDM_STATUS_IS_ERROR(status)) {
+      return status;
   }
 
-  Status = SpdmContext->send_message (SpdmContext, ResponseSize, Response, 0);
+  response = message;
+  response_size = message_size;
+  libspdm_zero_mem(response, response_size);
+
+  status = libspdm_build_response (spdm_context, session_id, is_app_message, &response_size, (void**)&response);
+  if (LIBSPDM_STATUS_IS_ERROR(status)) {
+    return status;
+  }
+
+  status = spdm_context->send_message (spdm_context, response_size, response, 0);
+
+  libspdm_release_sender_buffer (spdm_context);
 
   ioctl(spdmst->fd_cycles, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP);
   read(spdmst->fd_cycles, &rf, sizeof(rf));
 
-  if (IsAppMessage) {
-    RequestResponseCode = SPDM_VENDOR_DEFINED_REQUEST;
+  if (is_app_message) {
+    request_response_code = SPDM_VENDOR_DEFINED_REQUEST;
   } else {
-    RequestResponseCode = ((spdm_message_header_t*)SpdmContext->last_spdm_request)->request_response_code;
+    request_response_code = ((spdm_message_header_t*)spdm_context->last_spdm_request)->request_response_code;
   }
 
   if (accumulating) {
-    // fprintf(spdmst->out_f, "\taccumulating is true %02x %02x\n", previous_code, RequestResponseCode);
-    if (keep_accumulating(previous_code, RequestResponseCode)) {
-      // fprintf(spdmst->out_f, "\t\tkeep_accumulating() %02x %02x\n", previous_code, RequestResponseCode);
+    // fprintf(spdmst->out_f, "\taccumulating is true %02x %02x\n", previous_code, request_response_code);
+    if (keep_accumulating(previous_code, request_response_code)) {
+      // fprintf(spdmst->out_f, "\t\tkeep_accumulating() %02x %02x\n", previous_code, request_response_code);
       cycle_accum += rf.values[CYCLES].value;
       clock_accum += rf.values[TASK_CLOCK].value;
       instr_accum += rf.values[INSTRUCTIONS].value;
     } else {
       // fprintf(spdmst->out_f, "\t\twill not keep_accumulating()\n");
       fprintf(spdmst->out_f, "%s%s,\t%lu cycles,\t%lu ns,\t%lu instructions\n",
-              spdmdev_requestreponsecode_to_str(previous_code), get_suffix(previous_code, usePsk, accumulating),
+              spdmdev_requestreponsecode_to_str(previous_code), get_suffix(previous_code, use_psk, accumulating),
               cycle_accum, clock_accum, instr_accum);
       accumulating = 0;
       cycle_accum = instr_accum = clock_accum = 0;
     }
   }
 
-  if (RequestResponseCode == SPDM_GET_VERSION) {
+  if (request_response_code == SPDM_GET_VERSION) {
     char filename[sizeof("uio_responder_iXXXXX.log")];
     void *dummy_ctx;
     struct read_format rf_inner;
     count_getversion++;
+    spdm_clearall_session_id(spdm_context);
     if (spdmst->out_f != NULL) {
       fclose(spdmst->out_f);
       spdmst->out_f = NULL;
     }
-    sprintf(filename, "uio_responder_i%d.log", count_getversion);
+    sprintf(filename, "uio_responder1.3_i%d.log", count_getversion);
     spdmst->out_f = fopen(filename, "w");
 
     ioctl(spdmst->fd_cycles, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
@@ -1129,44 +1205,49 @@ SpdmDevSpdmResponderDispatchMessage (
   }
 
   if (!accumulating) {
-    // fprintf(spdmst->out_f, "\taccumulating is false %02x %02x\n", previous_code, RequestResponseCode);
+    // fprintf(spdmst->out_f, "\taccumulating is false %02x %02x\n", previous_code, request_response_code);
     cycle_accum += rf.values[CYCLES].value;
     clock_accum += rf.values[TASK_CLOCK].value;
     instr_accum += rf.values[INSTRUCTIONS].value;
-    if (should_accumulate(RequestResponseCode, ((spdm_message_header_t*)SpdmContext->last_spdm_request)->param2)) {
-      // fprintf(spdmst->out_f, "\t\tstart accumulating now %02x %02x\n", previous_code, RequestResponseCode);
+    if (should_accumulate(request_response_code, ((spdm_message_header_t*)spdm_context->last_spdm_request)->param2)) {
+      // fprintf(spdmst->out_f, "\t\tstart accumulating now %02x %02x\n", previous_code, request_response_code);
       accumulating = 1;
     } else {
       fprintf(spdmst->out_f, "%s%s,\t%lu cycles,\t%lu ns,\t%lu instructions\n",
-              spdmdev_requestreponsecode_to_str(RequestResponseCode), get_suffix(RequestResponseCode, usePsk, accumulating),
+              spdmdev_requestreponsecode_to_str(request_response_code), get_suffix(request_response_code, use_psk, accumulating),
               cycle_accum, clock_accum, instr_accum);
       cycle_accum = instr_accum = clock_accum = 0;
     }
   }
 
-  if (Status == RETURN_SUCCESS && RequestResponseCode == SPDM_NEGOTIATE_ALGORITHMS) {
+  if (status == LIBSPDM_STATUS_SUCCESS && request_response_code == SPDM_NEGOTIATE_ALGORITHMS) {
     // load certificates and stuff
+    // qemu_mutex_lock(&spdm_io_mutex);
     ioctl(spdmst->fd_cycles, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
     ioctl(spdmst->fd_cycles, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
-    QemuSpdmServerCallback (spdmst->oSpdmContext);
+    spdmdev_server_callback (spdmst->dev_spdm_context);
     ioctl(spdmst->fd_cycles, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP);
     read(spdmst->fd_cycles, &rf, sizeof(rf));
+    // qemu_mutex_unlock(&spdm_io_mutex);
     fprintf(spdmst->out_f, "load_certificates,\t%lu cycles,\t%lu ns,\t%lu instructions\n",
               rf.values[CYCLES].value, rf.values[TASK_CLOCK].value, rf.values[INSTRUCTIONS].value);
   }
 
-  if (!(RequestResponseCode == SPDM_GET_ENCAPSULATED_REQUEST || RequestResponseCode == SPDM_DELIVER_ENCAPSULATED_RESPONSE)) {
-    previous_code = RequestResponseCode;
+  if (!(request_response_code == SPDM_GET_ENCAPSULATED_REQUEST || request_response_code == SPDM_DELIVER_ENCAPSULATED_RESPONSE)) {
+    previous_code = request_response_code;
   }
   fflush(spdmst->out_f);
 
-  return Status;
+  // free(request);
+  // free(response);
+
+  return status;
 }
 
 static void *spdmdev_io_thread(void *opaque)
 {
-    SpdmState *spdmst = opaque;
-    return_status Status;
+    spdmdev_state *spdmst = opaque;
+    // libspdm_return_t status;
 
     spdmdev_init_perf_events(&spdmst->fd_cycles, &spdmst->fd_taskclock, &spdmst->fd_instructions); // have to create it here, since cannot enable 'inherit' with PERF_FORMAT_GROUP
 
@@ -1184,16 +1265,22 @@ static void *spdmdev_io_thread(void *opaque)
             break;
         }
 
-        Status =
-        SpdmDevSpdmResponderDispatchMessage (spdmst);
+        // status =
+        spdmdev_spdm_responder_dispatch_message (spdmst);
 
-        if (Status == RETURN_SUCCESS) {
-            // load certificates and stuff
-            QemuSpdmServerCallback (spdmst->oSpdmContext);
-        }
+        // no need to do it every time
+        // if (status == LIBSPDM_STATUS_SUCCESS) {
+        //     // load certificates and stuff
 
+        //     qemu_mutex_lock(&spdm_io_mutex);
+        //     spdmdev_server_callback (spdmst->dev_spdm_context);
+        //     qemu_mutex_unlock(&spdm_io_mutex);
+        // }
+
+        // printf("0x%X\n",atomic_read(&spdm_ctrl));
         atomic_and(&spdm_ctrl, ~(SPDMDEV_TX_TO_DEV | SPDMDEV_TX_TO_DEV_DONE));
 
+        // printf("0x%X\n",atomic_read(&spdm_ctrl));
         if (atomic_read(&spdm_ctrl) & SPDMDEV_TX_TO_OS_DONE) {
             // printf("Raise SPDMIO_IRQ\n");
             qemu_mutex_lock_iothread();
@@ -1206,58 +1293,199 @@ static void *spdmdev_io_thread(void *opaque)
     return NULL;
 }
 
-int spdmdev_init_spdm(void **spdm_context) {
-  spdm_data_parameter_t          Parameter;
-  uint8_t                        Data8;
-  uint16_t                       Data16;
-  uint32_t                       Data32;
 
-  *spdm_context = (void *)malloc (spdm_get_context_size());
+libspdm_return_t spdm_responder_acquire_sender_buffer (void *context, void **msg_buf_ptr);
+void spdm_responder_release_sender_buffer(void *context, const void *msg_buf_ptr);
+libspdm_return_t spdm_responder_acquire_receiver_buffer (void *context, void **msg_buf_ptr);
+void spdm_responder_release_receiver_buffer(void *context, const void *msg_buf_ptr);
+
+/*
+ * SPDM acquire sender buffer
+ * */
+libspdm_return_t spdm_responder_acquire_sender_buffer (
+    void *context, void **msg_buf_ptr)
+{
+    qemu_mutex_lock(&spdm_io_mutex);
+    *msg_buf_ptr = (void *)malloc(SPDMDEV_MAX_BUF);
+    if (*msg_buf_ptr == NULL)
+        return LIBSPDM_STATUS_ACQUIRE_FAIL;
+    qemu_mutex_unlock(&spdm_io_mutex);
+
+    return LIBSPDM_STATUS_SUCCESS;
+}
+
+/*
+ * SPDM release sender buffer
+ * */
+void spdm_responder_release_sender_buffer(
+    void *context, const void *msg_buf_ptr)
+{
+    qemu_mutex_lock(&spdm_io_mutex);
+    if (msg_buf_ptr != NULL)
+        free((void *)msg_buf_ptr);
+    qemu_mutex_unlock(&spdm_io_mutex);
+
+    return;
+}
+
+/*
+ * SPDM acquire receiver buffer
+ * */
+libspdm_return_t spdm_responder_acquire_receiver_buffer (
+    void *context, void **msg_buf_ptr)
+{
+    qemu_mutex_lock(&spdm_io_mutex);
+    *msg_buf_ptr = (void *)malloc(SPDMDEV_MAX_BUF);
+    if (*msg_buf_ptr == NULL)
+        return LIBSPDM_STATUS_ACQUIRE_FAIL;
+    qemu_mutex_unlock(&spdm_io_mutex);
+
+
+    return LIBSPDM_STATUS_SUCCESS;
+}
+
+/*
+ * SPDM release receiver buffer
+ * */
+void spdm_responder_release_receiver_buffer(
+    void *context, const void *msg_buf_ptr)
+{
+    qemu_mutex_lock(&spdm_io_mutex);
+    if (msg_buf_ptr != NULL)
+        free((void *)msg_buf_ptr);
+    qemu_mutex_unlock(&spdm_io_mutex);
+
+    return;
+}
+
+int spdmdev_init_spdm(void **spdm_context) {
+  libspdm_data_parameter_t        parameter;
+  size_t                          scratch_buffer_size;
+  void *                          scratch_buffer;
+  uint8_t                         data8;
+  uint16_t                        data16;
+  uint32_t                        data32;
+  void *                          requester_cert_chain_buffer;
+  spdm_version_number_t           spdm_version;
+
+  *spdm_context = (void *)malloc (libspdm_get_context_size());
   if (*spdm_context == NULL) {
       return -1;
   }
-  spdm_init_context (*spdm_context);
+  libspdm_init_context (*spdm_context);
 
-  spdm_register_device_io_func (*spdm_context, SpdmDevSendMessage, SpdmDevReceiveMessage);
-  // spdm_register_transport_layer_func (*spdm_context, SpdmTransportPciDoeEncodeMessage, SpdmTransportPciDoeDecodeMessage);
-  spdm_register_transport_layer_func (*spdm_context, spdm_transport_mctp_encode_message, spdm_transport_mctp_decode_message);
-  Data8 = 0;
-  zero_mem (&Parameter, sizeof(Parameter));
-  Parameter.location = SPDM_DATA_LOCATION_LOCAL;
-  spdm_set_data (*spdm_context, SPDM_DATA_CAPABILITY_CT_EXPONENT, &Parameter, &Data8, sizeof(Data8));
+  libspdm_register_device_io_func (*spdm_context, spdmdev_send_message, spdmdev_receive_message);
 
-  Data32 = m_use_responder_capability_flags;
-  if (m_use_capability_flags != 0) {
-      Data32 = m_use_capability_flags;
+  libspdm_register_transport_layer_func(
+          *spdm_context,
+          (SPDMDEV_MAX_BUF - LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE - LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE),
+          LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE,
+          LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE,
+          libspdm_transport_mctp_encode_message,
+          libspdm_transport_mctp_decode_message);
+
+  libspdm_register_device_buffer_func(
+        *spdm_context,
+        SPDMDEV_MAX_BUF,
+        SPDMDEV_MAX_BUF,
+        spdm_responder_acquire_sender_buffer,
+        spdm_responder_release_sender_buffer,
+        spdm_responder_acquire_receiver_buffer,
+        spdm_responder_release_receiver_buffer);
+
+  scratch_buffer_size = libspdm_get_sizeof_required_scratch_buffer(*spdm_context);
+  scratch_buffer = (void *)malloc(scratch_buffer_size);
+  if (scratch_buffer == NULL) {
+      printf("Failed to allocate scratch buffer.\n");
+      free(*spdm_context);
+      return -1;
   }
-  spdm_set_data (*spdm_context, SPDM_DATA_CAPABILITY_FLAGS, &Parameter, &Data32, sizeof(Data32));
+  libspdm_set_scratch_buffer(*spdm_context, scratch_buffer, scratch_buffer_size);
 
-  Data8 = m_support_measurement_spec;
-  spdm_set_data (*spdm_context, SPDM_DATA_MEASUREMENT_SPEC, &Parameter, &Data8, sizeof(Data8));
-  Data32 = m_support_measurement_hash_algo;
-  spdm_set_data (*spdm_context, SPDM_DATA_MEASUREMENT_HASH_ALGO, &Parameter, &Data32, sizeof(Data32));
-  Data32 = m_support_asym_algo;
-  spdm_set_data (*spdm_context, SPDM_DATA_BASE_ASYM_ALGO, &Parameter, &Data32, sizeof(Data32));
-  Data32 = m_support_hash_algo;
-  spdm_set_data (*spdm_context, SPDM_DATA_BASE_HASH_ALGO, &Parameter, &Data32, sizeof(Data32));
-  Data16 = m_support_dhe_algo;
-  spdm_set_data (*spdm_context, SPDM_DATA_DHE_NAME_GROUP, &Parameter, &Data16, sizeof(Data16));
-  Data16 = m_support_aead_algo;
-  spdm_set_data (*spdm_context, SPDM_DATA_AEAD_CIPHER_SUITE, &Parameter, &Data16, sizeof(Data16));
-  Data16 = m_support_req_asym_algo;
-  spdm_set_data (*spdm_context, SPDM_DATA_REQ_BASE_ASYM_ALG, &Parameter, &Data16, sizeof(Data16));
-  Data16 = m_support_key_schedule_algo;
-  spdm_set_data (*spdm_context, SPDM_DATA_KEY_SCHEDULE, &Parameter, &Data16, sizeof(Data16));
+  requester_cert_chain_buffer = (void *)malloc(SPDM_MAX_CERTIFICATE_CHAIN_SIZE);
+    if (requester_cert_chain_buffer == NULL) {
+        printf("Failed to allocate requester_cert_chain_buffer.\n");
+        return -1;
+    }
+    libspdm_register_cert_chain_buffer(*spdm_context, requester_cert_chain_buffer, SPDM_MAX_CERTIFICATE_CHAIN_SIZE);
 
-  spdm_register_get_response_func (*spdm_context, QemuSpdmGetResponseVendorDefinedRequest);
+    if (!libspdm_check_context(*spdm_context)) {
+        printf("Failed SPDM context check.\n");
+        return -1;
+    }
+
+    if (m_use_version != 0) {
+        libspdm_zero_mem(&parameter, sizeof(parameter));
+        parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+        spdm_version = m_use_version << SPDM_VERSION_NUMBER_SHIFT_BIT;
+        libspdm_set_data(*spdm_context, LIBSPDM_DATA_SPDM_VERSION, &parameter,
+                  &spdm_version, sizeof(spdm_version));
+    }
+
+    if (m_use_secured_message_version != 0) {
+        libspdm_zero_mem(&parameter, sizeof(parameter));
+        if (m_use_secured_message_version != 0) {
+            parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+            spdm_version = m_use_secured_message_version << SPDM_VERSION_NUMBER_SHIFT_BIT;
+            libspdm_set_data(*spdm_context,
+                      LIBSPDM_DATA_SECURED_MESSAGE_VERSION,
+                      &parameter, &spdm_version,
+                      sizeof(spdm_version));
+        } else {
+            libspdm_set_data(*spdm_context,
+                      LIBSPDM_DATA_SECURED_MESSAGE_VERSION,
+                      &parameter, NULL, 0);
+        }
+    }
+
+  data8 = 0;
+  libspdm_zero_mem (&parameter, sizeof(parameter));
+  parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+  libspdm_set_data (*spdm_context, LIBSPDM_DATA_CAPABILITY_CT_EXPONENT, &parameter, &data8, sizeof(data8));
+
+  data32 = m_use_responder_capability_flags;
+  if (m_use_capability_flags != 0) {
+      data32 = m_use_capability_flags;
+  }
+  libspdm_set_data (*spdm_context, LIBSPDM_DATA_CAPABILITY_FLAGS, &parameter, &data32, sizeof(data32));
+
+  data8 = m_support_measurement_spec;
+  libspdm_set_data (*spdm_context, LIBSPDM_DATA_MEASUREMENT_SPEC, &parameter, &data8, sizeof(data8));
+  data32 = m_support_measurement_hash_algo;
+  libspdm_set_data (*spdm_context, LIBSPDM_DATA_MEASUREMENT_HASH_ALGO, &parameter, &data32, sizeof(data32));
+  data32 = m_support_asym_algo;
+  libspdm_set_data (*spdm_context, LIBSPDM_DATA_BASE_ASYM_ALGO, &parameter, &data32, sizeof(data32));
+  data32 = m_support_hash_algo;
+  libspdm_set_data (*spdm_context, LIBSPDM_DATA_BASE_HASH_ALGO, &parameter, &data32, sizeof(data32));
+  data16 = m_support_dhe_algo;
+  libspdm_set_data (*spdm_context, LIBSPDM_DATA_DHE_NAME_GROUP, &parameter, &data16, sizeof(data16));
+  data16 = m_support_aead_algo;
+  libspdm_set_data (*spdm_context, LIBSPDM_DATA_AEAD_CIPHER_SUITE, &parameter, &data16, sizeof(data16));
+  data16 = m_support_req_asym_algo;
+  libspdm_set_data (*spdm_context, LIBSPDM_DATA_REQ_BASE_ASYM_ALG, &parameter, &data16, sizeof(data16));
+  data16 = m_support_key_schedule_algo;
+  libspdm_set_data (*spdm_context, LIBSPDM_DATA_KEY_SCHEDULE, &parameter, &data16, sizeof(data16));
+  data8 = SPDM_ALGORITHMS_OPAQUE_DATA_FORMAT_1;
+  libspdm_set_data(*spdm_context, LIBSPDM_DATA_OTHER_PARAMS_SUPPORT, &parameter,
+                   &data8, sizeof(data8));
+  data8 = SPDM_MEL_SPECIFICATION_DMTF;
+  libspdm_set_data(*spdm_context, LIBSPDM_DATA_MEL_SPEC, &parameter,
+                   &data8, sizeof(data8));
+
+  data8 = 0xF0;
+  libspdm_set_data(*spdm_context, LIBSPDM_DATA_HEARTBEAT_PERIOD, &parameter,
+                   &data8, sizeof(data8));
+
+  libspdm_register_get_response_func (*spdm_context, spdmdev_get_response_vendor_defined_request);
 
   return 0;
 }
 
 static void pci_spdmdev_realize(PCIDevice *pdev, Error **errp)
 {
-    SpdmState *spdmst = SPDM(pdev);
+    spdmdev_state *spdmst = SPDM(pdev);
     uint8_t *pci_conf = pdev->config;
+    // libspdm_return_t        status;
 
     pci_config_set_interrupt_pin(pci_conf, 1);
 
@@ -1273,7 +1501,9 @@ static void pci_spdmdev_realize(PCIDevice *pdev, Error **errp)
     qemu_mutex_init(&spdm_io_mutex);
     qemu_cond_init(&spdmst->spdm_io_cond);
 
-    if (spdmdev_init_spdm(&spdmst->oSpdmContext)) {
+    qemu_mutex_init(&spdm_ctx_mutex);
+
+    if (spdmdev_init_spdm(&spdmst->dev_spdm_context)) {
       return;
     }
     // printf("SPDM context initialized\n");
@@ -1295,7 +1525,7 @@ static void pci_spdmdev_realize(PCIDevice *pdev, Error **errp)
 
 static void pci_spdmdev_uninit(PCIDevice *pdev)
 {
-    SpdmState *spdmst = SPDM(pdev);
+    spdmdev_state *spdmst = SPDM(pdev);
 
     qemu_mutex_lock(&spdmst->thr_mutex);
     qemu_mutex_lock(&spdm_io_mutex);
@@ -1329,7 +1559,7 @@ static void spdmdev_obj_uint64(Object *obj, Visitor *v, const char *name,
 
 static void spdmdev_instance_init(Object *obj)
 {
-    SpdmState *spdmst = SPDM(obj);
+    spdmdev_state *spdmst = SPDM(obj);
 
     spdmst->dma_mask = (1UL << 28) - 1;
     object_property_add(obj, "dma_mask", "uint64", spdmdev_obj_uint64,
@@ -1359,7 +1589,7 @@ static void pci_spdmdev_register_types(void)
     static const TypeInfo spdmdev_info = {
         .name          = TYPE_PCI_SPDM_DEVICE,
         .parent        = TYPE_PCI_DEVICE,
-        .instance_size = sizeof(SpdmState),
+        .instance_size = sizeof(spdmdev_state),
         .instance_init = spdmdev_instance_init,
         .class_init    = spdmdev_class_init,
         .interfaces = interfaces,

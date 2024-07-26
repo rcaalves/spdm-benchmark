@@ -13,11 +13,11 @@
 #define SOCKET_TRANSPORT_TYPE_MCTP 0x01
 #define SOCKET_TRANSPORT_TYPE_PCI_DOE 0x02
 
-static uint32 m_use_transport_layer = SOCKET_TRANSPORT_TYPE_MCTP;
+uint32_t m_use_transport_layer = SOCKET_TRANSPORT_TYPE_MCTP;
 
-static uint8 m_use_version = SPDM_MESSAGE_VERSION_11;
-static uint8 m_use_secured_message_version = SPDM_MESSAGE_VERSION_11;
-static uint32 m_use_requester_capability_flags =
+uint8_t m_use_version = SPDM_MESSAGE_VERSION_13; //SPDM_MESSAGE_VERSION_11;
+uint8_t m_use_secured_message_version = SECURED_SPDM_VERSION_11; //SECURED_SPDM_VERSION_10;
+uint32_t m_use_requester_capability_flags =
 	(0 |
 	 SPDM_GET_CAPABILITIES_REQUEST_FLAGS_CERT_CAP | /* conflict with SPDM_GET_CAPABILITIES_REQUEST_FLAGS_PUB_KEY_ID_CAP */
 	 SPDM_GET_CAPABILITIES_REQUEST_FLAGS_CHAL_CAP |
@@ -32,7 +32,7 @@ static uint32 m_use_requester_capability_flags =
 	 SPDM_GET_CAPABILITIES_REQUEST_FLAGS_HANDSHAKE_IN_THE_CLEAR_CAP |
 	 // SPDM_GET_CAPABILITIES_REQUEST_FLAGS_PUB_KEY_ID_CAP | /* conflict with SPDM_GET_CAPABILITIES_REQUEST_FLAGS_CERT_CAP */
 	 0);
-// static uint32 m_use_responder_capability_flags =
+// uint32_t m_use_responder_capability_flags =
 // 	(0 | SPDM_GET_CAPABILITIES_RESPONSE_FLAGS_CACHE_CAP |
 // 	 SPDM_GET_CAPABILITIES_RESPONSE_FLAGS_CERT_CAP | /* conflict with SPDM_GET_CAPABILITIES_RESPONSE_FLAGS_PUB_KEY_ID_CAP */
 // 	 SPDM_GET_CAPABILITIES_RESPONSE_FLAGS_CHAL_CAP |
@@ -52,53 +52,53 @@ static uint32 m_use_requester_capability_flags =
 // 	 // SPDM_GET_CAPABILITIES_RESPONSE_FLAGS_PUB_KEY_ID_CAP | /* conflict with SPDM_GET_CAPABILITIES_RESPONSE_FLAGS_CERT_CAP */
 // 	 0);
 
-static uint32 m_use_capability_flags = 0;
+uint32_t m_use_capability_flags = 0;
 /*
   0
   1
 */
-// static uint8 m_use_basic_mut_auth = 1;
+// uint8_t m_use_basic_mut_auth = 1;
 /*
   0
   SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED,
   SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED_WITH_ENCAP_REQUEST,
   SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED_WITH_GET_DIGESTS
 */
-// static uint8 m_use_mut_auth =
+// uint8_t m_use_mut_auth =
 // 	SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED_WITH_ENCAP_REQUEST;
 /*
   SPDM_CHALLENGE_REQUEST_NO_MEASUREMENT_SUMMARY_HASH,
   SPDM_CHALLENGE_REQUEST_TCB_COMPONENT_MEASUREMENT_HASH,
   SPDM_CHALLENGE_REQUEST_ALL_MEASUREMENTS_HASH
 */
-static uint8 m_use_measurement_summary_hash_type =
+uint8_t m_use_measurement_summary_hash_type =
 	SPDM_CHALLENGE_REQUEST_ALL_MEASUREMENTS_HASH;
 /*
   SPDM_GET_MEASUREMENTS_REQUEST_MEASUREMENT_OPERATION_TOTAL_NUMBER_OF_MEASUREMENTS, // one by one
   SPDM_GET_MEASUREMENTS_REQUEST_MEASUREMENT_OPERATION_ALL_MEASUREMENTS
 */
-// static uint8 m_use_measurement_operation =
+// uint8_t m_use_measurement_operation =
 // 	SPDM_GET_MEASUREMENTS_REQUEST_MEASUREMENT_OPERATION_TOTAL_NUMBER_OF_MEASUREMENTS;
-static uint8 m_use_slot_id = 0;
-static uint8 m_use_slot_count = 3;
+uint8_t m_use_slot_id = 0;
+uint8_t m_use_slot_count = 3;
 
 /*
   SPDM_KEY_UPDATE_ACTION_REQUESTER
   SPDM_KEY_UPDATE_ACTION_RESPONDER
   SPDM_KEY_UPDATE_ACTION_ALL
 */
-spdm_key_update_action_t m_use_key_update_action = SPDM_KEY_UPDATE_ACTION_ALL;
+// libspdm_key_update_action_t m_use_key_update_action = LIBSPDM_KEY_UPDATE_ACTION_MAX;
 
-static uint32 m_use_hash_algo;
-static uint32 m_use_measurement_hash_algo;
-static uint32 m_use_asym_algo;
-static uint16 m_use_req_asym_algo;
+uint32_t m_use_hash_algo;
+uint32_t m_use_measurement_hash_algo;
+uint32_t m_use_asym_algo;
+uint16_t m_use_req_asym_algo;
 
 /*
   SPDM_MEASUREMENT_BLOCK_HEADER_SPECIFICATION_DMTF,
 */
-static uint8 m_support_measurement_spec =
-	SPDM_MEASUREMENT_BLOCK_HEADER_SPECIFICATION_DMTF;
+uint8_t m_support_measurement_spec =
+	SPDM_MEASUREMENT_SPECIFICATION_DMTF;
 /*
   SPDM_ALGORITHMS_MEASUREMENT_HASH_ALGO_TPM_ALG_SHA3_512,
   SPDM_ALGORITHMS_MEASUREMENT_HASH_ALGO_TPM_ALG_SHA3_384,
@@ -108,7 +108,7 @@ static uint8 m_support_measurement_spec =
   SPDM_ALGORITHMS_MEASUREMENT_HASH_ALGO_TPM_ALG_SHA_256,
   SPDM_ALGORITHMS_MEASUREMENT_HASH_ALGO_RAW_BIT_STREAM_ONLY,
 */
-// static uint32 m_support_measurement_hash_algo =
+// uint32_t m_support_measurement_hash_algo =
 // 	SPDM_ALGORITHMS_MEASUREMENT_HASH_ALGO_TPM_ALG_SHA_512 |
 // 	SPDM_ALGORITHMS_MEASUREMENT_HASH_ALGO_TPM_ALG_SHA_384;
 /*
@@ -116,7 +116,7 @@ static uint8 m_support_measurement_spec =
   SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_384,
   SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_256,
 */
-static uint32 m_support_hash_algo = SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_384 |
+uint32_t m_support_hash_algo = SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_384 |
 			     SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_256;
 /*
   SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P521,
@@ -129,7 +129,7 @@ static uint32 m_support_hash_algo = SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_3
   SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_RSAPSS_2048,
   SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_RSASSA_2048,
 */
-static uint32 m_support_asym_algo =
+uint32_t m_support_asym_algo =
 	SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P384 |
 	SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P256;
 /*
@@ -143,7 +143,7 @@ static uint32 m_support_asym_algo =
   SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P384,
   SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P256,
 */
-static uint16 m_support_req_asym_algo =
+uint16_t m_support_req_asym_algo =
 	SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_RSAPSS_3072 |
 	SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_RSAPSS_2048 |
 	SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_RSASSA_3072 |
@@ -156,7 +156,7 @@ static uint16 m_support_req_asym_algo =
   SPDM_ALGORITHMS_DHE_NAMED_GROUP_SECP_384_R1,
   SPDM_ALGORITHMS_DHE_NAMED_GROUP_SECP_256_R1,
 */
-static uint16 m_support_dhe_algo = SPDM_ALGORITHMS_DHE_NAMED_GROUP_SECP_384_R1 |
+uint16_t m_support_dhe_algo = SPDM_ALGORITHMS_DHE_NAMED_GROUP_SECP_384_R1 |
 			    SPDM_ALGORITHMS_DHE_NAMED_GROUP_SECP_256_R1 |
 			    SPDM_ALGORITHMS_DHE_NAMED_GROUP_FFDHE_3072 |
 			    SPDM_ALGORITHMS_DHE_NAMED_GROUP_FFDHE_2048;
@@ -165,42 +165,14 @@ static uint16 m_support_dhe_algo = SPDM_ALGORITHMS_DHE_NAMED_GROUP_SECP_384_R1 |
   SPDM_ALGORITHMS_AEAD_CIPHER_SUITE_AES_128_GCM,
   SPDM_ALGORITHMS_AEAD_CIPHER_SUITE_CHACHA20_POLY1305,
 */
-static uint16 m_support_aead_algo =
+uint16_t m_support_aead_algo =
 	SPDM_ALGORITHMS_AEAD_CIPHER_SUITE_AES_256_GCM |
 	SPDM_ALGORITHMS_AEAD_CIPHER_SUITE_CHACHA20_POLY1305;
 /*
   SPDM_ALGORITHMS_KEY_SCHEDULE_HMAC_HASH,
 */
-static uint16 m_support_key_schedule_algo = SPDM_ALGORITHMS_KEY_SCHEDULE_HMAC_HASH;
+uint16_t m_support_key_schedule_algo = SPDM_ALGORITHMS_KEY_SCHEDULE_HMAC_HASH;
 
+uint8_t m_session_policy =
+  SPDM_KEY_EXCHANGE_REQUEST_SESSION_POLICY_TERMINATION_POLICY_RUNTIME_UPDATE;
 
-#define EXE_MODE_SHUTDOWN 0
-#define EXE_MODE_CONTINUE 1
-// extern uint32 m_exe_mode;
-
-#define EXE_CONNECTION_VERSION_ONLY 0x1
-#define EXE_CONNECTION_DIGEST 0x2
-#define EXE_CONNECTION_CERT 0x4
-#define EXE_CONNECTION_CHAL 0x8
-#define EXE_CONNECTION_MEAS 0x10
-// extern uint32 m_exe_connection;
-
-#define EXE_SESSION_KEY_EX 0x1
-#define EXE_SESSION_PSK 0x2
-#define EXE_SESSION_NO_END 0x4
-#define EXE_SESSION_KEY_UPDATE 0x8
-#define EXE_SESSION_HEARTBEAT 0x10
-#define EXE_SESSION_MEAS 0x20
-// extern uint32 m_exe_session;
-
-// static uint32 m_exe_mode = EXE_MODE_SHUTDOWN;
-
-static uint32 m_exe_connection = (0 |
-         // EXE_CONNECTION_VERSION_ONLY |
-         EXE_CONNECTION_DIGEST | EXE_CONNECTION_CERT |
-         EXE_CONNECTION_CHAL | EXE_CONNECTION_MEAS | 0);
-
-// static uint32 m_exe_session =
-//   (0 | EXE_SESSION_KEY_EX | EXE_SESSION_PSK |
-//    // EXE_SESSION_NO_END |
-//    EXE_SESSION_KEY_UPDATE | EXE_SESSION_HEARTBEAT | EXE_SESSION_MEAS | 0);

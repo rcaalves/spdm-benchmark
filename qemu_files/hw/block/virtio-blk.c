@@ -28,30 +28,39 @@
 #include "hw/virtio/virtio-bus.h"
 #include "hw/virtio/virtio-access.h"
 
+
+#define ENABLE_SPDM 1
+
+#if ENABLE_SPDM
 // avoiding some annoying redefine warnings
-#ifdef ARRAY_SIZE
-#undef ARRAY_SIZE
-#undef FALSE
-#undef TRUE
-#endif
+
+// #pragma GCC diagnostic ignored "-Wredundant-decls"
+// #pragma GCC diagnostic pop
 
 // libspdm includes
-
 #pragma GCC diagnostic ignored "-Wundef"
-#include "spdm_common_lib.h"
-#include "spdm_responder_lib.h"
-#include "spdm_responder_lib_internal.h"
-#include "spdm_device_secret_lib_internal.h"
-#include <../library/spdm_secured_message_lib/spdm_secured_message_lib_internal.h>
+#pragma GCC diagnostic ignored "-Wredundant-decls"
+#include <hal/base.h>
+#include <hal/library/memlib.h>
+#include <library/spdm_common_lib.h>
+#include <library/spdm_responder_lib.h>
 #include <library/spdm_transport_mctp_lib.h>
+#include <internal/libspdm_common_lib.h>
+#include <internal/libspdm_secured_message_lib.h>
+#include <spdm_device_secret_lib_internal.h>
 #include "mctp.h"
 #pragma GCC diagnostic pop
+#pragma GCC diagnostic pop
 
-#include "spdm_emu.c"
 
-#define SPDMDEV_MAX_BUF             (4096*4)
+#endif // ENABLE_SPDM
+#include "spdm_emu_blk.c"
 
+#define MAX_SPDM_MESSAGE_BUFFER_SIZE 0x2200
 #define BLK_SPDM_DEBUG 0
+#define BLK_SPDM_DEMO_PRINT 0
+#define DEMO_PRINT_LIMIT 256
+#define DEMO_BYTES_PER_LINE 16
 
 #if BLK_SPDM_DEBUG
 #define BLK_SPDM_PRINT(format,  ...) printf(format, ##__VA_ARGS__)
@@ -59,12 +68,7 @@
 #define BLK_SPDM_PRINT(format,  ...)
 #endif /*BLK_SPDM_DEBUG*/
 
-static QemuMutex spdm_io_mutex;
-static QemuCond spdm_io_cond;
-static uint8_t spdm_buf[SPDMDEV_MAX_BUF];
-static uint32_t spdm_buf_size;
-static int spdm_send_is_ready;
-static int spdm_receive_is_ready;
+#define SPDM_CTX_TO_VIRTIOBLOCK(spdm_context_ptr) *(VirtIOBlock**)((char*)(spdm_context_ptr) + libspdm_get_context_size())
 
 /* Config size before the discard support (hide associated config fields) */
 #define VIRTIO_BLK_CFG_SIZE offsetof(struct virtio_blk_config, \
@@ -89,109 +93,155 @@ static void virtio_blk_set_config_size(VirtIOBlock *s, uint64_t host_features)
     assert(s->config_size <= sizeof(struct virtio_blk_config));
 }
 
+void demo_print_buffer(char* buffer, size_t len, const char* message);
+
+void demo_print_buffer(char* buffer, size_t len, const char* message) {
+#if BLK_SPDM_DEMO_PRINT
+    int j, k;
+    unsigned char* c;
+    uint32_t print_limit = MIN(DEMO_PRINT_LIMIT, len);
+    uint32_t line_limit;
+    printf("%s\n", message);
+    printf("%lu bytes\n", len);
+    for (j = 0; j < print_limit; j+= DEMO_BYTES_PER_LINE) {
+        line_limit = MIN(DEMO_BYTES_PER_LINE, len - j);
+        printf("0x%02X\t", j);
+        // prints hexa
+        for (k = 0; k < line_limit; k++) {
+            c = &((unsigned  char*)buffer)[j+k];
+            printf ("%02X ", *c);
+        }
+        for (k = 0; k < DEMO_BYTES_PER_LINE - line_limit; k++) {
+            printf ("   ");
+        }
+        printf ("   ");
+        // prints human readable
+        for (k = 0; k < line_limit; k++) {
+            c = &((unsigned  char*)buffer)[j+k];
+            printf ("%c ", isprint(*c) ? *c : '-');
+        }
+        printf ("\n");
+    }
+    if (print_limit != len)
+        printf("Data truncated to %d bytes\n", DEMO_PRINT_LIMIT);
+    printf ("\n");
+#endif /* BLK_SPDM_DEMO_PRINT */
+}
+
+#if ENABLE_SPDM
+
 void
 virtio_blk_spdm_server_callback (
-  IN void                         *SpdmContext
+   void                         *spdm_context
   );
 
 void
 virtio_blk_spdm_server_callback (
-  IN void                         *SpdmContext
+   void                         *spdm_context
   )
 {
-  static boolean               AlgoProvisioned = FALSE;
-  boolean                      Res;
-  void                         *Data;
-  uintn                        DataSize;
-  spdm_data_parameter_t          Parameter;
-  uint8_t                        Data8;
-  uint16_t                       Data16;
-  uint32_t                       Data32;
-  return_status                Status;
-  void                         *Hash;
-  uintn                        HashSize;
-  uint8_t                        Index;
+    static bool AlgoProvisioned = false;
+    bool res;
+    // libspdm_return_t status;
+    libspdm_data_parameter_t parameter;
+    uint8_t Index;
+    uint8_t data8;
+    uint16_t data16;
+    uint32_t data32;
+    uint8_t m_use_slot_count = 3;
+    uint8_t m_use_slot_id = 0;
+    // uint32_t m_use_measurement_hash_algo;
+    uint32_t m_use_asym_algo;
+    uint32_t m_use_hash_algo;
+    uint16_t m_use_req_asym_algo;
+    size_t data_size;
+    size_t hash_size;
+    void *hash;
+    void *data;
 
-  if (AlgoProvisioned) {
-    return ;
-  }
-
-  zero_mem (&Parameter, sizeof(Parameter));
-  Parameter.location = SPDM_DATA_LOCATION_CONNECTION;
-
-  DataSize = sizeof(Data32);
-  spdm_get_data (SpdmContext, SPDM_DATA_CONNECTION_STATE, &Parameter, &Data32, &DataSize);
-  if (Data32 != SPDM_CONNECTION_STATE_NEGOTIATED) {
-    return ;
-  }
-
-  atomic_set(&AlgoProvisioned, TRUE);
-
-  DataSize = sizeof(Data32);
-  spdm_get_data (SpdmContext, SPDM_DATA_MEASUREMENT_HASH_ALGO, &Parameter, &Data32, &DataSize);
-  m_use_measurement_hash_algo = Data32;
-  DataSize = sizeof(Data32);
-  spdm_get_data (SpdmContext, SPDM_DATA_BASE_ASYM_ALGO, &Parameter, &Data32, &DataSize);
-  m_use_asym_algo = Data32;
-  DataSize = sizeof(Data32);
-  spdm_get_data (SpdmContext, SPDM_DATA_BASE_HASH_ALGO, &Parameter, &Data32, &DataSize);
-  m_use_hash_algo = Data32;
-  DataSize = sizeof(Data16);
-  spdm_get_data (SpdmContext, SPDM_DATA_REQ_BASE_ASYM_ALG, &Parameter, &Data16, &DataSize);
-  m_use_req_asym_algo = Data16;
-
-  Res = read_responder_public_certificate_chain (m_use_hash_algo, m_use_asym_algo, &Data, &DataSize, NULL, NULL);
-  if (Res) {
-    zero_mem (&Parameter, sizeof(Parameter));
-    Parameter.location = SPDM_DATA_LOCATION_LOCAL;
-    Data8 = m_use_slot_count;
-    spdm_set_data (SpdmContext, SPDM_DATA_LOCAL_SLOT_COUNT, &Parameter, &Data8, sizeof(Data8));
-
-    for (Index = 0; Index < m_use_slot_count; Index++) {
-      Parameter.additional_data[0] = Index;
-      spdm_set_data (SpdmContext, SPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN, &Parameter, Data, DataSize);
+    if (AlgoProvisioned) {
+        return;
     }
-    // do not free it
-  }
 
-  if (m_use_slot_id == 0xFF) {
-    Res = read_requester_public_certificate_chain (m_use_hash_algo, m_use_req_asym_algo, &Data, &DataSize, NULL, NULL);
-    if (Res) {
-      zero_mem (&Parameter, sizeof(Parameter));
-      Parameter.location = SPDM_DATA_LOCATION_LOCAL;
-      spdm_set_data (SpdmContext, SPDM_DATA_PEER_PUBLIC_CERT_CHAIN, &Parameter, Data, DataSize);
-      // Do not free it.
+    libspdm_zero_mem (&parameter, sizeof(parameter));
+    parameter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+
+    data_size = sizeof(data32);
+    libspdm_get_data (spdm_context, LIBSPDM_DATA_CONNECTION_STATE, &parameter, &data32, &data_size);
+    if (data32 != LIBSPDM_CONNECTION_STATE_NEGOTIATED) {
+        // printf ("data32 != SPDM_CONNECTION_STATE_NEGOTIATED: %u\n", data32);
+        return;
     }
-  } else {
-    Res = read_requester_root_public_certificate (m_use_hash_algo, m_use_req_asym_algo, &Data, &DataSize, &Hash, &HashSize);
-    if (Res) {
-      zero_mem (&Parameter, sizeof(Parameter));
-      Parameter.location = SPDM_DATA_LOCATION_LOCAL;
-      spdm_set_data (SpdmContext, SPDM_DATA_PEER_PUBLIC_ROOT_CERT_HASH, &Parameter, Hash, HashSize);
-      // Do not free it.
+
+    // AlgoProvisioned = true;
+    atomic_set(&AlgoProvisioned, true);
+
+    // data_size = sizeof(data32);
+    // libspdm_get_data (spdm_context, SPDM_DATA_MEASUREMENT_HASH_ALGO, &parameter, &data32, &data_size);
+    // m_use_measurement_hash_algo = data32;
+    data_size = sizeof(data32);
+    libspdm_get_data (spdm_context, LIBSPDM_DATA_BASE_ASYM_ALGO, &parameter, &data32, &data_size);
+    m_use_asym_algo = data32;
+    data_size = sizeof(data32);
+    libspdm_get_data (spdm_context, LIBSPDM_DATA_BASE_HASH_ALGO, &parameter, &data32, &data_size);
+    m_use_hash_algo = data32;
+    data_size = sizeof(data16);
+    libspdm_get_data (spdm_context, LIBSPDM_DATA_REQ_BASE_ASYM_ALG, &parameter, &data16, &data_size);
+    m_use_req_asym_algo = data16;
+
+    res = libspdm_read_responder_public_certificate_chain (m_use_hash_algo, m_use_asym_algo, &data, &data_size, NULL, NULL);
+    if (res) {
+        libspdm_zero_mem (&parameter, sizeof(parameter));
+        parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+        data8 = m_use_slot_count;
+        libspdm_set_data (spdm_context, LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN, &parameter, &data8, sizeof(data8));
+
+        for (Index = 0; Index < m_use_slot_count; Index++) {
+            parameter.additional_data[0] = Index;
+            libspdm_set_data (spdm_context, LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN, &parameter, data, data_size);
+        }
+        // do not free it
     }
-  }
 
-  if (Res) {
-    Data8 = m_use_mut_auth;
-    if (Data8 != 0) {
-      Data8 |= SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED;
+    if (m_use_slot_id == 0xFF) {
+        res = libspdm_read_requester_public_certificate_chain (m_use_hash_algo, m_use_req_asym_algo, &data, &data_size, NULL, NULL);
+        if (res) {
+            libspdm_zero_mem (&parameter, sizeof(parameter));
+            parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+            libspdm_set_data (spdm_context, LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN, &parameter, data, data_size);
+            // Do not free it.
+        }
+    } else {
+        res = libspdm_read_requester_root_public_certificate (m_use_hash_algo, m_use_req_asym_algo, &data, &data_size, &hash, &hash_size);
+        if (res) {
+            libspdm_zero_mem (&parameter, sizeof(parameter));
+            parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+            libspdm_set_data (spdm_context, LIBSPDM_DATA_PEER_PUBLIC_ROOT_CERT, &parameter, hash, hash_size);
+            // Do not free it.
+        }
     }
-    Parameter.additional_data[0] = m_use_slot_id;
-    Parameter.additional_data[1] = m_use_measurement_summary_hash_type;
-    spdm_set_data (SpdmContext, SPDM_DATA_MUT_AUTH_REQUESTED, &Parameter, &Data8, sizeof(Data8));
 
-    Data8 = (m_use_mut_auth & 0x1);
-    spdm_set_data (SpdmContext, SPDM_DATA_BASIC_MUT_AUTH_REQUESTED, &Parameter, &Data8, sizeof(Data8));
-  }
+    if (res) {
+        data8 = SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED_WITH_ENCAP_REQUEST;
+        if (data8 != 0) {
+            data8 |= SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED;
+        }
+        parameter.additional_data[0] = m_use_slot_id; // ReqSlotNum;
+        parameter.additional_data[1] = SPDM_CHALLENGE_REQUEST_ALL_MEASUREMENTS_HASH; // MeasurementHashType;
+        libspdm_set_data (spdm_context, LIBSPDM_DATA_MUT_AUTH_REQUESTED, &parameter, &data8, sizeof(data8));
 
-  Status = spdm_set_data (SpdmContext, SPDM_DATA_PSK_HINT, NULL, (void *) TEST_PSK_HINT_STRING, sizeof(TEST_PSK_HINT_STRING));
-  if (RETURN_ERROR(Status)) {
-    printf ("SpdmSetData - %x\n", (uint32_t)Status);
-  }
+        data8 = (SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED_WITH_ENCAP_REQUEST & 0x1);
+        libspdm_set_data (spdm_context, LIBSPDM_DATA_BASIC_MUT_AUTH_REQUESTED, &parameter, &data8, sizeof(data8));
+    }
 
-  return ;
+    libspdm_zero_mem(&parameter, sizeof(parameter));
+    parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+    data8 = 0x3F;
+    libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_SUPPORTED_SLOT_MASK, &parameter,
+                        &data8, sizeof(data8));
+  return;
 }
+#endif // ENABLE_SPDM
 
 static void virtio_blk_init_request(VirtIOBlock *s, VirtQueue *vq,
                                     VirtIOBlockReq *req)
@@ -260,16 +310,23 @@ static void virtio_blk_rw_complete(void *opaque, int ret)
         VirtIOBlockReq *req = next;
         next = req->mr_next;
         trace_virtio_blk_rw_complete(vdev, req, ret);
-
+#if ENABLE_SPDM
         int reqtype = virtio_ldl_p(VIRTIO_DEVICE(s), &req->out.type);
         BLK_SPDM_PRINT("HPSPDM complete req type %d, niov %d, iov[0].iov_len %lu\n", reqtype, req->qiov.niov, req->qiov.iov[0].iov_len);
-        if (reqtype == VIRTIO_BLK_T_SPDM_APP) {
-            struct iovec *in_iov = req->qiov.iov;
-            unsigned in_num = req->qiov.niov;
+        if (reqtype == VIRTIO_BLK_T_SPDM_APP /*!(reqtype & VIRTIO_BLK_T_OUT)*/) {
+            struct iovec *in_iov = req->qiov.iov; //req->elem.in_sg;
+            unsigned in_num = req->qiov.niov; //req->elem.in_num;
 
             uint8_t cipher_data[MAX_SPDM_MESSAGE_BUFFER_SIZE];
-            uintn cipher_size = MAX_SPDM_MESSAGE_BUFFER_SIZE;
-            return_status status;
+            void *cipher_data_ptr = cipher_data;
+            size_t cipher_size = MAX_SPDM_MESSAGE_BUFFER_SIZE;
+
+            uint8_t *my_response;
+            size_t my_response_size;
+            uint8_t *scratch_buffer;
+            size_t scratch_buffer_size;
+
+            libspdm_return_t status;
 
 #if BLK_SPDM_DEBUG
             for (int j = 0; j < MIN(64, req->qiov.iov[0].iov_len); j++) {
@@ -280,38 +337,78 @@ static void virtio_blk_rw_complete(void *opaque, int ret)
             printf ("\n");
 #endif
 
+            // for (int i = 0; i < in_num; i ++) {
+                // demo_print_buffer(in_iov[i].iov_base, in_iov[i].iov_len, "Hard drive is about to send the following data (clear text):");
+            // }
 
             for (int i = 0; i < in_num; i ++) {
                 // at least extra 512 bytes has been allocated on kernel side
                 cipher_size = in_iov[i].iov_len + 512;
                 BLK_SPDM_PRINT("trying to encode in_iov[%d] len: %lu\n", i, in_iov[i].iov_len);
-                if (((spdm_context_t *)s->spdm_context)->last_spdm_request_session_id_valid) {
+                if (((libspdm_context_t *)s->spdm_context)->last_spdm_request_session_id_valid) {
+                  size_t transport_header_size = ((libspdm_context_t *)s->spdm_context)->local_context.capability.transport_header_size;
+
+                  libspdm_get_scratch_buffer (s->spdm_context, (void **)&scratch_buffer, &scratch_buffer_size);
+#if LIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP
+                  my_response = scratch_buffer + libspdm_get_scratch_buffer_secure_message_offset(s->spdm_context) +
+                        transport_header_size;
+                  my_response_size = libspdm_get_scratch_buffer_secure_message_capacity(s->spdm_context) -
+                        transport_header_size - ((libspdm_context_t *)s->spdm_context)->local_context.capability.transport_tail_size;
+#else
+                  my_response = scratch_buffer + transport_header_size;
+                  my_response_size = scratch_buffer_size - transport_header_size -
+                        ((libspdm_context_t *)s->spdm_context)->local_context.capability.transport_tail_size;
+#endif /* LIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP */
+
+                  if (my_response_size < in_iov[i].iov_len + sizeof(mctp_message_header_t)) {
+                    printf("Scratch buffer too small!\n");
+                  } else {
+                    my_response_size = in_iov[i].iov_len + sizeof(mctp_message_header_t);
+                  }
+                  ((mctp_message_header_t*)my_response)->message_type = MCTP_MESSAGE_TYPE_VENDOR_DEFINED_PCI;
+                  memcpy(my_response + sizeof(mctp_message_header_t), ((uint8_t *)in_iov[i].iov_base), in_iov[i].iov_len);
 
                   // making room for the mctp header
-                  memmove( ((uint8_t *)in_iov[i].iov_base) + sizeof(mctp_message_header_t), in_iov[i].iov_base, in_iov[i].iov_len );
-                  ((mctp_message_header_t*)in_iov[i].iov_base)->message_type = MCTP_MESSAGE_TYPE_VENDOR_DEFINED_PCI;
+                  // memmove( ((uint8_t *)in_iov[i].iov_base) + sizeof(mctp_message_header_t), in_iov[i].iov_base, in_iov[i].iov_len );
+                  // ((mctp_message_header_t*)in_iov[i].iov_base)->message_type = MCTP_MESSAGE_TYPE_VENDOR_DEFINED_PCI;
 
-                  status = ((spdm_context_t *)s->spdm_context)->transport_encode_message(s->spdm_context, &(((spdm_context_t *)s->spdm_context)->last_spdm_request_session_id), TRUE, FALSE,
-                                                                                         in_iov[i].iov_len + sizeof(mctp_message_header_t), in_iov[i].iov_base,
-                                                                                         &cipher_size, cipher_data);
-                  if (RETURN_ERROR(status)) {
-                      printf("%s: transport_encode_message status - %llx\n", __func__, status);
+                  // ToDo: not sure if we are running atomicaly in this function or not...
+                  // qemu_mutex_lock(&spdm_encdec_mutex);
+
+                  status = ((libspdm_context_t *)s->spdm_context)->transport_encode_message(s->spdm_context, &(((libspdm_context_t *)s->spdm_context)->last_spdm_request_session_id), true, false,
+                                                                                         // in_iov[i].iov_len + sizeof(mctp_message_header_t), in_iov[i].iov_base,
+                                                                                         my_response_size, my_response,
+                                                                                         &cipher_size, &cipher_data_ptr);
+                  // qemu_mutex_unlock(&spdm_encdec_mutex);
+                  if (LIBSPDM_STATUS_IS_ERROR(status)) {
+                      printf("%s: transport_encode_message status - %x\n", __func__, status);
                       return;
                   }
-                  BLK_SPDM_PRINT("\tsize after encoding %llu\n", cipher_size);
-                  memcpy(((uint8_t*) in_iov[i].iov_base) + sizeof(uint32_t), cipher_data, cipher_size);
+                  BLK_SPDM_PRINT("\tsize after encoding %lu\n", cipher_size);
+                  memcpy(((uint8_t*) in_iov[i].iov_base) + sizeof(uint32_t), cipher_data_ptr, cipher_size);
 
                   // changing iov_len does not reflect on the kernel side and may cause problems on qemu
                   // in_iov[i].iov_len = cipher_size + sizeof(uint32_t);
                   // so the message size is encoded in the first 4 bytes
                   * ((uint32_t*) ((uint8_t*) in_iov[i].iov_base)) = cipher_size;
+                  // demo_print_buffer(in_iov[i].iov_base, in_iov[i].iov_len, "Hard drive is about to send the following data (encrypted):");
 
+                  /* test code without spdm encryption */
+                  // uint32_t temp_iov_len = in_iov[i].iov_len /*- 512*/;
+                  // memmove( ((uint8_t *)in_iov[i].iov_base) + sizeof(mctp_message_header_t) + sizeof(uint32_t), in_iov[i].iov_base, temp_iov_len /*in_iov[i].iov_len*/ );
+                  // * ((uint32_t*) ((uint8_t*) in_iov[i].iov_base)) = temp_iov_len; // in_iov[i].iov_len + sizeof(mctp_message_header_t);
+                  /* end test code without spdm encryption */
                 } else {
-                    printf("Invalid last_spdm_request_session_id_valid\n");
+                    static bool first = true;
+                    if (first) {
+                        first = false;
+                    } else {
+                        printf("Invalid last_spdm_request_session_id_valid\n");
+                    }
                 }
             }
         }
-
+#endif //ENABLE_SPDM
         if (req->qiov.nalloc != -1) {
             /* If nalloc is != -1 req->qiov is a local copy of the original
              * external iovec. It was allocated in submit_requests to be
@@ -606,8 +703,8 @@ static inline void submit_requests(BlockBackend *blk, MultiReqBuffer *mrb,
                               is_write ? BLOCK_ACCT_WRITE : BLOCK_ACCT_READ,
                               num_reqs - 1);
     }
-#if BLK_SPDM_DEBUG
     else {
+#if BLK_SPDM_DEBUG
         printf("qiov->iov->iov_len: %lu, niov %d\n", qiov->iov->iov_len, qiov->niov);
         if (is_write) {
             for (int j = 0; j < qiov->iov->iov_len; j++) {
@@ -617,8 +714,12 @@ static inline void submit_requests(BlockBackend *blk, MultiReqBuffer *mrb,
             }
             printf ("\n");
         }
-    }
 #endif
+
+        // if (is_write) {
+            // demo_print_buffer(qiov->iov->iov_base, qiov->iov->iov_len, "Hard drive received the following data (clear text):");
+        // }
+    }
 
     if (is_write) {
         blk_aio_pwritev(blk, sector_num << BDRV_SECTOR_BITS, qiov, 0,
@@ -814,62 +915,75 @@ err:
     return err_status;
 }
 
-void spdm_fix_internal_seqno(spdm_context_t *spdm_context, uint8 *msg_buffer) {
+#if ENABLE_SPDM
+void spdm_fix_internal_seqno(libspdm_context_t *spdm_context, uint8_t *msg_buffer);
+
+void spdm_fix_internal_seqno(libspdm_context_t *spdm_context, uint8_t *msg_buffer) {
     // hax to fix out of order sequence numbers, considering 16-bit overflows
     // considering the "danger zone" += 1/4 of the whole range
-    const uint64 WRAP_DANGER_OUT = 0x4000;
-    const uint64 WRAP_DANGER_IN  = 0xC000;
-    // these static variables should be defined one of each per spdm_context (or block device)
-    static uint64 remaining_bits = 0;
-    static uint8 in_danger = 0;
-    static uint8 wrapped = 0;
+    const uint64_t WRAP_DANGER_OUT = 0x4000;
+    const uint64_t WRAP_DANGER_IN  = 0xC000;
 
-    spdm_session_info_t *session_info = NULL;
-    spdm_secured_message_context_t *secured_message_context = NULL;
-    if (spdm_context->transport_decode_message != spdm_transport_mctp_decode_message) {
+    VirtIOBlock *s = SPDM_CTX_TO_VIRTIOBLOCK(spdm_context);
+    libspdm_session_info_t *session_info = NULL;
+    libspdm_secured_message_context_t *secured_message_context = NULL;
+    if (spdm_context->transport_decode_message != libspdm_transport_mctp_decode_message) {
       printf("%s: Not supported!\n", __func__);
       return;
     }
     // get seqno within the packet
-    uint64 seqno = 0;
-    uint8 seqno_size = spdm_mctp_get_sequence_number(0, (uint8_t*)&seqno);
+    uint64_t seqno = 0;
+    uint8_t seqno_size = libspdm_mctp_get_sequence_number(0, (uint8_t*)&seqno);
 
+    // ToDo: maybe we should worry about endianess...
     memcpy(&seqno, msg_buffer + sizeof(mctp_message_header_t) + sizeof(spdm_secured_message_a_data_header1_t), seqno_size);
 
     if ((seqno & 0xFFFF) == WRAP_DANGER_OUT) {
-        wrapped = 0;
-        in_danger = 0;
-        BLK_SPDM_PRINT("out of danger! %llX \n", seqno);
+        s->wrapped = 0;
+        s->in_danger = 0;
+        BLK_SPDM_PRINT("out of danger! %lX \n", seqno);
     }
 
     if ((seqno & 0xFFFF) >= WRAP_DANGER_IN) {
-        in_danger = 1;
+        s->in_danger = 1;
+        // printf("in the danger zone! %llX \n", seqno);
     }
 
     if ((seqno & 0xFFFF) == 0xFFFF) {
-        remaining_bits += 0x10000;
-        wrapped = 1;
-        BLK_SPDM_PRINT("wrapped! %llX \n", seqno);
+        s->remaining_bits += 0x10000;
+        s->wrapped = 1;
+        BLK_SPDM_PRINT("wrapped! %lX \n", seqno);
     }
 
-    seqno += remaining_bits;
+    // printf("%06llX", seqno);
 
-    if (in_danger && !wrapped && ((seqno & 0xFFFF) < WRAP_DANGER_OUT)) {
+    seqno += s->remaining_bits;
+
+    if (s->in_danger && !s->wrapped && ((seqno & 0xFFFF) < WRAP_DANGER_OUT)) {
         seqno += 0x10000;
     }
-    if (in_danger && wrapped && ((seqno & 0xFFFF) >= WRAP_DANGER_IN)) {
+    if (s->in_danger && s->wrapped && ((seqno & 0xFFFF) >= WRAP_DANGER_IN)) {
         seqno -= 0x10000;
     }
 
+    // printf(" => %06llX \n", seqno);
+
     // set seqno in all active sessions
-    for (int i = 0; i <= MAX_SPDM_SESSION_COUNT; i++) {
+    for (int i = 0; i <= LIBSPDM_MAX_SESSION_COUNT; i++) {
         if (spdm_context->session_info[i].session_id != INVALID_SESSION_ID) {
-            session_info = spdm_get_session_info_via_session_id(spdm_context, spdm_context->session_info[i].session_id);
-            secured_message_context = session_info->secured_message_context;
-            secured_message_context->application_secret.request_data_sequence_number = seqno;
+            session_info = libspdm_get_session_info_via_session_id(spdm_context, spdm_context->session_info[i].session_id);
+            if (session_info) {
+                secured_message_context = session_info->secured_message_context;
+                secured_message_context->application_secret.request_data_sequence_number = seqno;
+                // memcpy(&secured_message_context->application_secret.request_data_sequence_number, seqno, seqno_size);
+                // or response_data_sequence_number, depending on the source.
+            } else {
+                // printf("session info %d is null\n", i);
+            }
         }
     }
 }
+#endif // ENABLE_SPDM
 
 static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
 {
@@ -909,6 +1023,13 @@ static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
     type = virtio_ldl_p(vdev, &req->out.type);
 
     BLK_SPDM_PRINT("virtio_blk_handle_request type: %u sector: %lu\n", type, req->sector_num);
+
+
+    if (type == (VIRTIO_BLK_T_SPDM_APP | VIRTIO_BLK_T_OUT) || type == (VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT)) {
+        for (int i = 0; i < out_num && (&out_iov[i])->iov_len != 0; i ++) {
+            demo_print_buffer((&out_iov[i])->iov_base, (&out_iov[i])->iov_len, "Hard drive received the following data:");
+        }
+    }
 
     /* VIRTIO_BLK_T_OUT defines the command direction. VIRTIO_BLK_T_BARRIER
      * is an optional flag. Although a guest should not send this flag if
@@ -1017,47 +1138,48 @@ HANDLE_RW_L:
 
         break;
     }
+#if ENABLE_SPDM
     case VIRTIO_BLK_T_SPDM:
     {
         bool is_write = type & VIRTIO_BLK_T_OUT;
 
         if (is_write) {
             BLK_SPDM_PRINT("VIRTIO_BLK_T_SPDM (write) %lu %p %p %d \n",out_iov->iov_len, req, out_iov, out_num);
-            qemu_mutex_lock(&spdm_io_mutex);
+            qemu_mutex_lock(&s->spdm_io_mutex);
 
-            spdm_buf_size = 0;
+            s->spdm_buf_size = 0;
             for (int i = 0; i < out_num; i ++) {
-              memcpy(spdm_buf + spdm_buf_size, (&out_iov[i])->iov_base, (&out_iov[i])->iov_len);
-              spdm_buf_size += (&out_iov[i])->iov_len;
+              memcpy(s->spdm_buf + s->spdm_buf_size, (&out_iov[i])->iov_base, (&out_iov[i])->iov_len);
+              s->spdm_buf_size += (&out_iov[i])->iov_len;
             }
 
-            spdm_receive_is_ready = 1;
-            qemu_cond_signal(&spdm_io_cond);
-            qemu_mutex_unlock(&spdm_io_mutex);
+            s->spdm_receive_is_ready = 1;
+            qemu_cond_signal(&s->spdm_io_cond);
+            qemu_mutex_unlock(&s->spdm_io_mutex);
         } else {
             BLK_SPDM_PRINT("VIRTIO_BLK_T_SPDM (read) %lu, byte 0: %02X \n",in_iov->iov_len, ((unsigned  char*)in_iov->iov_base)[0]);
 
             memset(in_iov->iov_base, 0, in_iov->iov_len);
-            qemu_mutex_lock(&spdm_io_mutex);
-            if (!spdm_send_is_ready) {
-                qemu_cond_wait(&spdm_io_cond, &spdm_io_mutex);
+            qemu_mutex_lock(&s->spdm_io_mutex);
+            if (!s->spdm_send_is_ready) {
+                qemu_cond_wait(&s->spdm_io_cond, &s->spdm_io_mutex);
             }
-            spdm_send_is_ready = 0;
-            if (in_iov->iov_len < spdm_buf_size) {
+            s->spdm_send_is_ready = 0;
+            if (in_iov->iov_len < s->spdm_buf_size + 1 + sizeof(s->spdm_buf_size)) {
+                // TODO: how to inform SpdmSend there is a problem?
                 BLK_SPDM_PRINT("Buffer too small\n");
                 virtio_blk_req_complete(req, VIRTIO_BLK_S_IOERR);
                 virtio_blk_free_request(req);
                 break;
             }
-            in_iov->iov_len = spdm_buf_size + sizeof(spdm_buf_size);
+            in_iov->iov_len = s->spdm_buf_size + sizeof(s->spdm_buf_size);
             * ((uint8_t*) in_iov->iov_base) = MCTP_MESSAGE_TYPE_SPDM;
 
-            * ((uint32_t*) (((uint8_t*) in_iov->iov_base) + 1)) = spdm_buf_size;
-            BLK_SPDM_PRINT("response size %u %X\n", spdm_buf_size, spdm_buf_size);
+            * ((uint32_t*) (((uint8_t*) in_iov->iov_base) + 1)) = s->spdm_buf_size;
+            BLK_SPDM_PRINT("response size %u %X\n", s->spdm_buf_size, s->spdm_buf_size);
+            memcpy(in_iov->iov_base + 1 + sizeof(s->spdm_buf_size), s->spdm_buf, s->spdm_buf_size); // magic number: 1 header byte
 
-            memcpy(in_iov->iov_base + 1 + sizeof(spdm_buf_size), spdm_buf, spdm_buf_size); // magic number: 1 header byte
-
-            qemu_mutex_unlock(&spdm_io_mutex);
+            qemu_mutex_unlock(&s->spdm_io_mutex);
         }
 
         virtio_blk_req_complete(req, VIRTIO_BLK_S_OK);
@@ -1070,10 +1192,10 @@ HANDLE_RW_L:
 
         uint32_t *message_session_id;
         unsigned char *temp_buffer = NULL;
-        uintn temp_buffer_size;
-        return_status status;
-        boolean is_app_message;
-        spdm_context_t *spdm_context = s->spdm_context;
+        size_t temp_buffer_size;
+        libspdm_return_t status;
+        bool is_app_message;
+        libspdm_context_t *spdm_context = s->spdm_context;
         size_t copied_len;
         int i;
 
@@ -1083,28 +1205,46 @@ HANDLE_RW_L:
 
             temp_buffer_size = 0;
             for (int i = 0; i < out_num; i ++) {
+                // internal_dump_hex((unsigned  char*) (&out_iov[i])->iov_base, (&out_iov[i])->iov_len);
+                // printf(" out_iov[%d].iov_len %lu \n",i, out_iov[i].iov_len);
+                // demo_print_buffer((&out_iov[i])->iov_base, (&out_iov[i])->iov_len, "Hard drive received the following data (encrypted):");
                 temp_buffer = (unsigned char*) realloc(temp_buffer, temp_buffer_size + (&out_iov[i])->iov_len);
                 memcpy(temp_buffer + temp_buffer_size, (&out_iov[i])->iov_base, (&out_iov[i])->iov_len);
                 temp_buffer_size += (&out_iov[i])->iov_len;
             }
 
+            // Do we need to enforce spdm_context mutually exclusive access?
+            // qemu_mutex_lock(&spdm_encdec_mutex);
             // force seqno
             spdm_fix_internal_seqno(s->spdm_context, temp_buffer);
-            status = spdm_process_request((spdm_context_t*)(s->spdm_context), &message_session_id, &is_app_message,
+            status = libspdm_process_request((libspdm_context_t*)(s->spdm_context), &message_session_id, &is_app_message,
                                           temp_buffer_size, temp_buffer);
+            // qemu_mutex_unlock(&spdm_encdec_mutex);
+            if (LIBSPDM_STATUS_IS_ERROR(status) || !is_app_message) {
+                printf ("oops: ");
+                for (int i = 0; i < 16; i++) {
+                    printf ("%02X ", temp_buffer[i]);
+                }
+                printf ("\n");
+            }
             free(temp_buffer);
+            // printf("spdm_context->last_spdm_request_size %lu - %X\n", spdm_context->last_spdm_request_size, status);
 
-            if (RETURN_ERROR(status) || !is_app_message) {
-                printf("%s: transport_decode_message error status - %llx (is app %u)\n", __func__, status, is_app_message);
-                printf("temp_buffer_size %llu\n", temp_buffer_size);
+            // internal_dump_hex((unsigned  char*) spdm_context->last_spdm_request, spdm_context->last_spdm_request_size);
+
+            if (LIBSPDM_STATUS_IS_ERROR(status) || !is_app_message) {
+                printf("%s: transport_decode_message error status - %x (is app %u)\n", __func__, status, is_app_message);
+                printf("temp_buffer_size %lu\n", temp_buffer_size);
                 virtio_blk_req_complete(req, VIRTIO_BLK_S_IOERR);
                 virtio_blk_free_request(req);
                 return 0;
             } else {
                 copied_len = sizeof(mctp_message_header_t); // skip MCTP header
                 i=0;
+                // printf("spdm_context->last_spdm_request_size %lu\n", spdm_context->last_spdm_request_size);
                 while (copied_len < spdm_context->last_spdm_request_size) {
                     if (i > out_num) break;
+                    // printf(" out_iov[%d].iov_len %lu, spdm_context->last_spdm_request_size - copied_len %lu\n",i, out_iov[i].iov_len, spdm_context->last_spdm_request_size - copied_len);
                     out_iov[i].iov_len = MIN(out_iov[i].iov_len, spdm_context->last_spdm_request_size - copied_len);
                     memcpy(out_iov[i].iov_base, spdm_context->last_spdm_request + copied_len, out_iov[i].iov_len);
                     copied_len += out_iov[i].iov_len;
@@ -1122,6 +1262,10 @@ HANDLE_RW_L:
         } else {
             BLK_SPDM_PRINT("VIRTIO_BLK_T_SPDM_APP (read) %lu, in_num %u; byte 0: %02X \n",in_iov->iov_len, in_num, ((unsigned  char*)in_iov->iov_base)[0]);
 
+            // changing the iov_len was causing problems...
+            // for (int i = 0; i < in_num; i++) {
+            //     in_iov[i].iov_len -= 512; // magic number: assuming the driver is allocating 512 extra bytes
+            // }
             BLK_SPDM_PRINT("this is a converted read request\n");
             goto HANDLE_RW_L;
 
@@ -1131,6 +1275,7 @@ HANDLE_RW_L:
 
       break;
     }
+#endif // ENABLE_SPDM
     default:
         virtio_blk_req_complete(req, VIRTIO_BLK_S_UNSUPP);
         virtio_blk_free_request(req);
@@ -1476,91 +1621,128 @@ static const BlockDevOps virtio_block_ops = {
     .resize_cb = virtio_blk_resize,
 };
 
+#if ENABLE_SPDM
 // Functions to be used with spdm_register_device_io_func
-return_status virtio_blk_spdm_send (
-  IN     void                    *SpdmContext,
-  IN     uintn                   RequestSize,
-  IN     void                    *Request,
-  IN     uint64                  Timeout
+libspdm_return_t virtio_blk_spdm_send (
+       void                    *spdm_context,
+       size_t                   request_size,
+       const void              *request,
+       uint64_t                  timeout
   );
 
-return_status virtio_blk_spdm_receive (
-  IN     void                    *SpdmContext,
-  IN OUT uintn                   *ResponseSize,
-  IN OUT void                    *Response,
-  IN     uint64                  Timeout
+libspdm_return_t virtio_blk_spdm_receive (
+    void                    *spdm_context,
+    size_t                   *response_size,
+    void                    **response,
+    uint64_t                  timeout
   );
 
-return_status virtio_blk_spdm_send (
-  IN     void                    *SpdmContext,
-  IN     uintn                   RequestSize,
-  IN     void                    *Request,
-  IN     uint64                  Timeout
+libspdm_return_t virtio_blk_spdm_send (
+       void                    *spdm_context,
+       size_t                   request_size,
+       const void              *request,
+       uint64_t                 timeout
   )
 {
+    VirtIOBlock *s = SPDM_CTX_TO_VIRTIOBLOCK(spdm_context);
     BLK_SPDM_PRINT("virtio_blk_spdm_send\n");
 
-    if (RequestSize > sizeof(spdm_buf)) {
-        printf("RequestSize too large %llu\n", RequestSize);
-        return RETURN_DEVICE_ERROR;
+    if (request_size > sizeof(s->spdm_buf)) {
+        printf("request_size too large %lu\n", request_size);
+        return LIBSPDM_STATUS_BUFFER_TOO_SMALL;
     }
 
-    qemu_mutex_lock(&spdm_io_mutex);
-    spdm_buf_size = RequestSize;
-    memcpy(spdm_buf, Request, RequestSize);
-    spdm_send_is_ready = 1;
-    qemu_cond_signal(&spdm_io_cond);
-    qemu_mutex_unlock(&spdm_io_mutex);
-    return RETURN_SUCCESS;
-}
-
-return_status virtio_blk_spdm_receive (
-  IN     void                    *SpdmContext,
-  IN OUT uintn                   *ResponseSize,
-  IN OUT void                    *Response,
-  IN     uint64                  Timeout
-  )
-{
-    BLK_SPDM_PRINT("virtio_blk_spdm_receive\n");
-    if (*ResponseSize < atomic_read(&spdm_buf_size)) {
-        printf("*ResponseSize too small %llu\n", *ResponseSize);
-        return RETURN_DEVICE_ERROR;
-    }
+    qemu_mutex_lock(&s->spdm_io_mutex);
+    s->spdm_buf_size = request_size;
+    memcpy(s->spdm_buf, request, request_size);
 #if BLK_SPDM_DEBUG
-    for (int i = 0; i < spdm_buf_size; i++) {
-      printf("%02X ", ((uint8_t*)spdm_buf)[i]);
+    for (int i = 0; i < s->spdm_buf_size; i++) {
+      printf("%02X ", ((uint8_t*)s->spdm_buf)[i]);
     }
     printf("\n");
 #endif
-    qemu_mutex_lock(&spdm_io_mutex);
-    *ResponseSize = spdm_buf_size;
-    memcpy(Response, spdm_buf, *ResponseSize);
-    qemu_mutex_unlock(&spdm_io_mutex);
-    return RETURN_SUCCESS;
+    s->spdm_send_is_ready = 1;
+    qemu_cond_signal(&s->spdm_io_cond);
+    qemu_mutex_unlock(&s->spdm_io_mutex);
+    return LIBSPDM_STATUS_SUCCESS;
+}
+
+
+static void spdm_clearall_session_id(libspdm_context_t *spdm_context)
+{
+    libspdm_session_info_t *session_info;
+    size_t index;
+
+    session_info = spdm_context->session_info;
+    for (index = 0; index < LIBSPDM_MAX_SESSION_COUNT; index++) {
+        session_info[index].session_id = (INVALID_SESSION_ID & 0xFFFF);
+    }
+}
+
+libspdm_return_t virtio_blk_spdm_receive (
+    void                     *spdm_context,
+    size_t                   *response_size,
+    void                    **response,
+    uint64_t                  timeout
+  )
+{
+    VirtIOBlock *s = SPDM_CTX_TO_VIRTIOBLOCK(spdm_context);
+    const uint8_t GET_VERSION[] = {0x05, 0x10, 0x84, 0x00, 0x00};
+    BLK_SPDM_PRINT("virtio_blk_spdm_receive\n");
+    if (*response_size < atomic_read(&s->spdm_buf_size)) {
+        printf("*response_size too small %lu\n", *response_size);
+        return LIBSPDM_STATUS_BUFFER_TOO_SMALL;
+    }
+#if BLK_SPDM_DEBUG
+    for (int i = 0; i < s->spdm_buf_size; i++) {
+      printf("%02X ", ((uint8_t*)s->spdm_buf)[i]);
+    }
+    printf("\n");
+#endif
+    // Hax to for all sessions to be cleared
+    // not clearing cases problems after MAX_SPDM_SESSION_COUNT VM reboots due to session vector overflow
+    // could not find a more appropriate location to do it (does not work on virtio_blk_reset)
+    qemu_mutex_lock(&s->spdm_io_mutex);
+    if (!memcmp(GET_VERSION, s->spdm_buf, sizeof(GET_VERSION))) {
+        BLK_SPDM_PRINT("Got get_version: clearing all sessions...\n");
+        spdm_clearall_session_id(spdm_context);
+        s->remaining_bits = 0;
+        s->in_danger = 0;
+        s->wrapped = 0;
+    }
+    *response_size = s->spdm_buf_size;
+    memcpy(*response, s->spdm_buf, *response_size);
+    qemu_mutex_unlock(&s->spdm_io_mutex);
+    return LIBSPDM_STATUS_SUCCESS;
 }
 
 static void *virtio_blk_spdm_io_thread(void *opaque)
 {
     VirtIOBlock *s = opaque;
-    return_status Status;
+    libspdm_return_t status;
 
     while (1) {
         BLK_SPDM_PRINT("virtio_blk_spdm_io_thread() loop\n");
-        qemu_mutex_lock(&spdm_io_mutex);
-        if (!spdm_receive_is_ready) {
-            qemu_cond_wait(&spdm_io_cond, &spdm_io_mutex);
+        qemu_mutex_lock(&s->spdm_io_mutex);
+        if (!s->spdm_receive_is_ready) {
+            qemu_cond_wait(&s->spdm_io_cond, &s->spdm_io_mutex);
         }
-        spdm_receive_is_ready = 0;
+        s->spdm_receive_is_ready = 0;
 
-        qemu_mutex_unlock(&spdm_io_mutex);
+        qemu_mutex_unlock(&s->spdm_io_mutex);
 
-        Status = spdm_responder_dispatch_message (s->spdm_context);
+        // ToDo: whats the stopping condition?
+        // if (spdmst->stopping) {
+        //     break;
+        // }
 
-        if (Status == RETURN_SUCCESS) {
+        status = libspdm_responder_dispatch_message (s->spdm_context);
+
+        if (status == LIBSPDM_STATUS_SUCCESS) {
             // load certificates and stuff
             virtio_blk_spdm_server_callback (s->spdm_context);
         } else {
-            printf("SpdmResponderDispatchMessage error: %llX\n", Status);
+            printf("SpdmResponderDispatchMessage error: %X\n", status);
         }
 
     }
@@ -1568,12 +1750,17 @@ static void *virtio_blk_spdm_io_thread(void *opaque)
     return NULL;
 }
 
-return_status spdm_get_response_vendor_defined_request(
-  IN void *spdm_context, IN uint32 *session_id, IN boolean is_app_message,
-  IN uintn request_size, IN void *request, IN OUT uintn *response_size,
-  OUT void *response)
+libspdm_return_t spdm_get_response_vendor_defined_request(
+   void *spdm_context, const uint32_t *session_id,  bool is_app_message,
+   size_t request_size, const void *request,   size_t *response_size,
+   void *response);
+
+libspdm_return_t spdm_get_response_vendor_defined_request(
+   void *spdm_context, const uint32_t *session_id,  bool is_app_message,
+   size_t request_size, const void *request,   size_t *response_size,
+   void *response)
 {
-  uint8_t *request_bytes = request;
+  const uint8_t *request_bytes = request;
   if (request_bytes[1] == SPDM_BLK_APP_TAMPER) {
     uint8_t index = request_bytes[2];
     ts[index] = MAX(ts[index], ts[index] + 1);
@@ -1581,66 +1768,191 @@ return_status spdm_get_response_vendor_defined_request(
   }
   memcpy(response, request, request_size);
   *response_size = request_size;
-  return RETURN_SUCCESS;
+  return LIBSPDM_STATUS_SUCCESS;
+}
+
+libspdm_return_t virtioblk_spdm_acquire_buffer (void *context, void **msg_buf_ptr);
+void virtioblk_spdm_release_buffer(void *context, const void *msg_buf_ptr);
+
+libspdm_return_t virtioblk_spdm_acquire_buffer (
+    void *context, void **msg_buf_ptr)
+{
+    VirtIOBlock *s = SPDM_CTX_TO_VIRTIOBLOCK(context);
+    qemu_mutex_lock(&s->spdm_io_mutex);
+    *msg_buf_ptr = (void *)malloc(SPDMDEV_MAX_BUF);
+    if (*msg_buf_ptr == NULL)
+        return LIBSPDM_STATUS_ACQUIRE_FAIL;
+    qemu_mutex_unlock(&s->spdm_io_mutex);
+
+    return LIBSPDM_STATUS_SUCCESS;
+}
+
+void virtioblk_spdm_release_buffer(
+    void *context, const void *msg_buf_ptr)
+{
+    VirtIOBlock *s = SPDM_CTX_TO_VIRTIOBLOCK(context);
+    qemu_mutex_lock(&s->spdm_io_mutex);
+    if (msg_buf_ptr != NULL)
+        free((void *)msg_buf_ptr);
+    qemu_mutex_unlock(&s->spdm_io_mutex);
+
+    return;
 }
 
 static int virtio_blk_spdm_init(VirtIOBlock *s) {
-    spdm_data_parameter_t          Parameter;
-    uint8_t                        Data8;
-    uint16_t                       Data16;
-    uint32_t                       Data32;
+    uint8_t data8;
+    uint16_t data16;
+    uint32_t data32;
+    uint8_t m_use_version = SPDM_MESSAGE_VERSION_13; //SPDM_MESSAGE_VERSION_11;
+    uint8_t m_use_secured_message_version = SECURED_SPDM_VERSION_11;
+    libspdm_data_parameter_t parameter;
+    spdm_version_number_t spdm_version;
+    size_t scratch_buffer_size;
+    void *requester_cert_chain_buffer;
 
-    s->spdm_context = (void *)malloc (spdm_get_context_size());
+    BLK_SPDM_PRINT("init_spdm\n");
+    s->spdm_context = (void *)malloc(libspdm_get_context_size() + sizeof(VirtIOBlock*));
     if (s->spdm_context == NULL) {
+        printf("Failed to initialize SPDM context.\n");
         return -1;
     }
-    spdm_init_context(s->spdm_context);
 
-    BLK_SPDM_PRINT("virtio_blk_spdm_init: SPDM context initialized\n");
+    // Initialize context variable
+    libspdm_init_context(s->spdm_context);
 
-    spdm_register_device_io_func (s->spdm_context, virtio_blk_spdm_send, virtio_blk_spdm_receive);
-    // spdm_register_transport_layer_func (spdmst->oSpdmContext, spdm_transport_pci_doe_encode_message, spdm_transport_pci_doe_decode_message);
-    spdm_register_transport_layer_func (s->spdm_context, spdm_transport_mctp_encode_message, spdm_transport_mctp_decode_message);
+    SPDM_CTX_TO_VIRTIOBLOCK(s->spdm_context) = s;
 
-    zero_mem (&Parameter, sizeof(Parameter));
-    Parameter.location = SPDM_DATA_LOCATION_LOCAL;
-    spdm_set_data (s->spdm_context, SPDM_DATA_CAPABILITY_CT_EXPONENT, &Parameter, &Data8, sizeof(Data8));
+    // Set functions for setting and receiving SPDM messages
+    libspdm_register_device_io_func(
+            s->spdm_context,
+            virtio_blk_spdm_send,
+            virtio_blk_spdm_receive);
 
-    Data32 = m_use_responder_capability_flags;
-    if (m_use_capability_flags != 0) {
-        Data32 = m_use_capability_flags;
+    libspdm_register_transport_layer_func(
+            s->spdm_context,
+            (SPDMDEV_MAX_BUF - LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE - LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE),
+            LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE,
+            LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE,
+            libspdm_transport_mctp_encode_message,
+            libspdm_transport_mctp_decode_message);
+
+    libspdm_register_device_buffer_func(
+        s->spdm_context,
+        SPDMDEV_MAX_BUF,
+        SPDMDEV_MAX_BUF,
+        virtioblk_spdm_acquire_buffer,
+        virtioblk_spdm_release_buffer,
+        virtioblk_spdm_acquire_buffer,
+        virtioblk_spdm_release_buffer);
+
+    scratch_buffer_size = libspdm_get_sizeof_required_scratch_buffer(s->spdm_context);
+    s->scratch_buffer = (void *)malloc(scratch_buffer_size);
+    if (s->scratch_buffer == NULL) {
+        printf("Failed to allocate scratch buffer.\n");
+        free(s->spdm_context);
+        return -1;
     }
-    spdm_set_data (s->spdm_context, SPDM_DATA_CAPABILITY_FLAGS, &Parameter, &Data32, sizeof(Data32));
+    libspdm_set_scratch_buffer(s->spdm_context, s->scratch_buffer, scratch_buffer_size);
 
-    Data8 = m_support_measurement_spec;
-    spdm_set_data (s->spdm_context, SPDM_DATA_MEASUREMENT_SPEC, &Parameter, &Data8, sizeof(Data8));
-    Data32 = m_support_measurement_hash_algo;
-    spdm_set_data (s->spdm_context, SPDM_DATA_MEASUREMENT_HASH_ALGO, &Parameter, &Data32, sizeof(Data32));
-    Data32 = m_support_asym_algo;
-    spdm_set_data (s->spdm_context, SPDM_DATA_BASE_ASYM_ALGO, &Parameter, &Data32, sizeof(Data32));
-    Data32 = m_support_hash_algo;
-    spdm_set_data (s->spdm_context, SPDM_DATA_BASE_HASH_ALGO, &Parameter, &Data32, sizeof(Data32));
-    Data16 = m_support_dhe_algo;
-    spdm_set_data (s->spdm_context, SPDM_DATA_DHE_NAME_GROUP, &Parameter, &Data16, sizeof(Data16));
-    Data16 = m_support_aead_algo;
-    spdm_set_data (s->spdm_context, SPDM_DATA_AEAD_CIPHER_SUITE, &Parameter, &Data16, sizeof(Data16));
-    Data16 = m_support_req_asym_algo;
-    spdm_set_data (s->spdm_context, SPDM_DATA_REQ_BASE_ASYM_ALG, &Parameter, &Data16, sizeof(Data16));
-    Data16 = m_support_key_schedule_algo;
-    spdm_set_data (s->spdm_context, SPDM_DATA_KEY_SCHEDULE, &Parameter, &Data16, sizeof(Data16));
+    requester_cert_chain_buffer = (void *)malloc(SPDM_MAX_CERTIFICATE_CHAIN_SIZE);
+    if (requester_cert_chain_buffer == NULL) {
+        printf("Failed to allocate requester_cert_chain_buffer.\n");
+        return -1;
+    }
+    libspdm_register_cert_chain_buffer(s->spdm_context, requester_cert_chain_buffer, SPDM_MAX_CERTIFICATE_CHAIN_SIZE);
 
-    qemu_mutex_init(&spdm_io_mutex);
-    qemu_cond_init(&spdm_io_cond);
-    spdm_buf_size = 0;
-    spdm_send_is_ready = 0;
-    spdm_receive_is_ready = 0;
+    if (!libspdm_check_context(s->spdm_context)) {
+        printf("Failed SPDM context check.\n");
+        return -1;
+    }
 
-    spdm_register_get_response_func(s->spdm_context, spdm_get_response_vendor_defined_request);
+    if (m_use_version != 0) {
+        libspdm_zero_mem(&parameter, sizeof(parameter));
+        parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+        spdm_version = m_use_version << SPDM_VERSION_NUMBER_SHIFT_BIT;
+        libspdm_set_data(s->spdm_context, LIBSPDM_DATA_SPDM_VERSION, &parameter,
+                  &spdm_version, sizeof(spdm_version));
+    }
+
+    if (m_use_secured_message_version != 0) {
+        libspdm_zero_mem(&parameter, sizeof(parameter));
+        if (m_use_secured_message_version != 0) {
+            parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+            spdm_version = m_use_secured_message_version << SPDM_VERSION_NUMBER_SHIFT_BIT;
+            libspdm_set_data(s->spdm_context,
+                      LIBSPDM_DATA_SECURED_MESSAGE_VERSION,
+                      &parameter, &spdm_version,
+                      sizeof(spdm_version));
+        } else {
+            libspdm_set_data(s->spdm_context,
+                      LIBSPDM_DATA_SECURED_MESSAGE_VERSION,
+                      &parameter, NULL, 0);
+        }
+    }
+
+    libspdm_zero_mem(&parameter, sizeof(parameter));
+    parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+
+    data8 = 0;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_CAPABILITY_CT_EXPONENT,
+              &parameter, &data8, sizeof(data8));
+    data32 = m_use_responder_capability_flags;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_CAPABILITY_FLAGS, &parameter,
+              &data32, sizeof(data32));
+
+    data8 = m_support_measurement_spec;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_MEASUREMENT_SPEC, &parameter,
+              &data8, sizeof(data8));
+    data32 = m_support_measurement_hash_algo;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_MEASUREMENT_HASH_ALGO, &parameter,
+              &data32, sizeof(data32));
+    data32 = m_support_asym_algo;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_BASE_ASYM_ALGO, &parameter,
+              &data32, sizeof(data32));
+    data32 = m_support_hash_algo;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_BASE_HASH_ALGO, &parameter,
+              &data32, sizeof(data32));
+    data16 = m_support_dhe_algo;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_DHE_NAME_GROUP, &parameter,
+              &data16, sizeof(data16));
+    data16 = m_support_aead_algo;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_AEAD_CIPHER_SUITE, &parameter,
+              &data16, sizeof(data16));
+    data16 = m_support_req_asym_algo;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_REQ_BASE_ASYM_ALG, &parameter,
+              &data16, sizeof(data16));
+    data16 = m_support_key_schedule_algo;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_KEY_SCHEDULE, &parameter, &data16,
+              sizeof(data16));
+    data8 = SPDM_ALGORITHMS_OPAQUE_DATA_FORMAT_1;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_OTHER_PARAMS_SUPPORT, &parameter,
+                     &data8, sizeof(data8));
+    data8 = SPDM_MEL_SPECIFICATION_DMTF;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_MEL_SPEC, &parameter,
+                     &data8, sizeof(data8));
+
+    data8 = 0xF0;
+    libspdm_set_data(s->spdm_context, LIBSPDM_DATA_HEARTBEAT_PERIOD, &parameter,
+                     &data8, sizeof(data8));
+
+    qemu_mutex_init(&s->spdm_io_mutex);
+    // qemu_mutex_init(&spdm_encdec_mutex);
+    qemu_cond_init(&s->spdm_io_cond);
+    s->spdm_buf_size = 0;
+    s->spdm_send_is_ready = 0;
+    s->spdm_receive_is_ready = 0;
+
+    s->remaining_bits = 0;
+    s->in_danger = 0;
+    s->wrapped = 0;
+
+    libspdm_register_get_response_func(s->spdm_context, spdm_get_response_vendor_defined_request);
 
     qemu_thread_create(&s->spdm_io_thread, "spdm_io_virtio_blk", virtio_blk_spdm_io_thread,
                        s, QEMU_THREAD_JOINABLE);
     return 0;
 }
+#endif // ENABLE_SPDM
 
 static void virtio_blk_device_realize(DeviceState *dev, Error **errp)
 {
@@ -1729,8 +2041,9 @@ static void virtio_blk_device_realize(DeviceState *dev, Error **errp)
     s->change = qemu_add_vm_change_state_handler(virtio_blk_dma_restart_cb, s);
     blk_set_dev_ops(s->blk, &virtio_block_ops, s);
     blk_set_guest_block_size(s->blk, s->conf.conf.logical_block_size);
-
+#if ENABLE_SPDM
     virtio_blk_spdm_init(s);
+#endif
 
     blk_iostatus_enable(s->blk);
 }

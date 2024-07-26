@@ -12,51 +12,50 @@
 
 #include "spdm_emu.h"
 
-typedef return_status (*app_fun_t)(void*, uint32);
+typedef libspdm_return_t (*app_fun_t)(void*, uint32_t);
 
-return_status
+libspdm_return_t
 uio_spdm_init_connection (
-  IN     void                 *opaque,
-  IN     char                 collect_stats
+      void                 *opaque,
+      char                 collect_stats
   );
 
-return_status
+libspdm_return_t
 uio_do_authentication_via_spdm (
-  IN void *spdm_context,
-  IN char collect_stats
+  void *spdm_context,
+  char collect_stats
   );
 
-return_status
+libspdm_return_t
 uio_do_measurement_via_spdm (
-  IN void *spdm_context
+  void *spdm_context
   );
 
-return_status
+libspdm_return_t
 uio_do_session_via_spdm (
-  IN void                 *opaque,
-  IN boolean              use_psk,
-  // IN boolean              update_key,
-  IN app_fun_t             app_fun
+  void                *opaque,
+  bool                use_psk,
+  app_fun_t           app_fun
   );
 
-return_status
+libspdm_return_t
 uio_do_app_session_via_spdm (
-  IN void                            *spdm_context,
-  IN uint32                          session_id
+  void                            *spdm_context,
+  uint32_t                         session_id
   );
 
-return_status
+libspdm_return_t
 uio_do_rng_app_session_via_spdm (
-  IN void                            *spdm_context,
-  IN uint32                          session_id
+  void                            *spdm_context,
+  uint32_t                         session_id
   );
 
-return_status
+libspdm_return_t
 spdm_uio_load_certificates (
-  IN void *spdm_context
+  void *spdm_context
   );
 
-return_status get_measurement_to_buffer(void *opaque, uint8 index, uint8 *out_buf, size_t *buf_len);
+libspdm_return_t get_measurement_to_buffer(void *opaque, uint8_t index, uint8_t *out_buf, size_t *buf_len);
 
 size_t print_measurement(spdm_measurement_block_dmtf_t *measurement_block_dmtf);
 
@@ -109,5 +108,13 @@ struct read_format {
 #else
 #define ERROR_PRINT(format,  ...)
 #endif
+
+#define DUMP_ARRAY(msg, array, array_size) \
+  printf("%s: %s (size %ld)", __func__, msg, array_size); \
+  for(int __i = 0; __i < array_size; __i++) { \
+    if(__i % 16 == 0) printf("\n[%03x] ", __i); \
+    printf("%02x ", ((uint8_t*)array)[__i]); \
+  } \
+  printf("\n");
 
 #endif //_UIO_REQUESTER_AUX_
